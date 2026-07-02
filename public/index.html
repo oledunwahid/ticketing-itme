@@ -11,6 +11,14 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Global App Loading Screen -->
+  <div id="app-loading" class="app-loading-screen">
+    <div class="spinner-container">
+      <div class="spinner"></div>
+      <p>Synchronizing session...</p>
+    </div>
+  </div>
+
   <!-- App Container -->
   <div class="app-container">
     
@@ -47,16 +55,40 @@
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          New Ticket
+          Create Ticket
+        </button>
+        <button class="nav-item" id="btn-nav-users" data-target="section-users" style="display: none;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          Users
+        </button>
+        <button class="nav-item" id="btn-nav-reports" data-target="section-reports" style="display: none;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          Reports
         </button>
       </nav>
 
-      <div class="user-profile">
-        <div class="avatar">A</div>
-        <div class="user-details">
-          <span class="user-name font-semibold">Agent Admin</span>
-          <span class="user-role">Support Lead</span>
+      <div class="user-profile-wrapper" style="width: 100%;">
+        <div class="user-profile">
+          <div class="avatar" id="user-avatar">?</div>
+          <div class="user-details">
+            <span class="user-name font-semibold" id="sidebar-user-name">Loading...</span>
+            <span class="user-role" id="sidebar-user-role">...</span>
+          </div>
         </div>
+        <button class="nav-item btn-logout" id="btn-logout" style="margin-top: 12px; border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; width: 100%;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Sign Out
+        </button>
       </div>
     </aside>
 
@@ -352,6 +384,264 @@
           </div>
         </section>
 
+        <!-- 3a. User Management View -->
+        <section id="section-users" class="content-section">
+          <div class="section-header tickets-section-header">
+            <div>
+              <h1>User Management</h1>
+              <p class="section-subtitle">Manage registration, staff provisioning, and role assignments.</p>
+            </div>
+            <div style="display:flex; align-items:center; gap: 12px;">
+              <div class="user-search-wrapper">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="position:absolute; left:12px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--text-muted);">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input type="text" id="user-search-input" placeholder="Search users..." autocomplete="off">
+              </div>
+              <button class="btn btn-primary" id="btn-add-user">Add User</button>
+            </div>
+          </div>
+          
+          <div class="master-detail-layout" style="display: block;">
+            <div id="users-table-wrapper" class="tickets-table-wrapper" style="backdrop-filter: blur(10px); background: var(--bg-glass); border: 1px solid var(--border-glass); border-radius: var(--border-radius); padding: 24px;">
+              <table class="tickets-table" style="width: 100%;">
+                <thead>
+                  <tr>
+                    <th>User Info</th>
+                    <th>Email Address</th>
+                    <th>Role</th>
+                    <th>Brand</th>
+                    <th>Created At</th>
+                    <th style="text-align: right;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="users-table-body">
+                  <!-- Loaded dynamically -->
+                </tbody>
+              </table>
+              <div id="users-empty-state" class="empty-state" style="display: none; padding: 40px 0;">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                </svg>
+                <h3>No Users Found</h3>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3b. Reports View -->
+        <section id="section-reports" class="content-section">
+          <div class="section-header">
+            <div>
+              <h1>Ticketing Reports</h1>
+              <p class="section-subtitle">Generate and export reports based on support ticket metrics.</p>
+            </div>
+          </div>
+
+          <!-- Filters Card -->
+          <div class="card-form-wrapper" style="max-width: 100%; margin-bottom: 24px; padding: 24px;">
+            <div class="form-row grid-2" style="margin-bottom: 16px;">
+              <div class="form-group">
+                <label for="report-status">Status</label>
+                <select id="report-status">
+                  <option value="">All Statuses</option>
+                  <option value="New">New</option>
+                  <option value="Open">Open</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Solved">Solved</option>
+                  <option value="Closed">Closed</option>
+                </select>
+              </div>
+              <div class="form-group grid-2" style="gap: 12px; grid-template-columns: 1fr 1fr;">
+                <div>
+                  <label for="report-start-date">Start Date</label>
+                  <input type="date" id="report-start-date" style="width: 100%;">
+                </div>
+                <div>
+                  <label for="report-end-date">End Date</label>
+                  <input type="date" id="report-end-date" style="width: 100%;">
+                </div>
+              </div>
+            </div>
+
+            <div class="form-row grid-2" style="margin-bottom: 24px;">
+              <div class="form-group">
+                <label for="report-customer">Customer</label>
+                <select id="report-customer">
+                  <option value="">All Customers</option>
+                  <!-- Populated dynamically -->
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="report-agent">Agent (Assignee)</label>
+                <select id="report-agent">
+                  <option value="">All Agents</option>
+                  <!-- Populated dynamically -->
+                </select>
+              </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 12px;">
+              <button class="btn btn-secondary" id="btn-reset-report-filters">Reset Filters</button>
+              <button class="btn btn-primary" id="btn-generate-report">Generate Report</button>
+            </div>
+          </div>
+
+          <!-- Report Results Wrapper -->
+          <div id="report-results-container" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <h2 style="font-size: 1.2rem; color: var(--text-primary);" id="report-results-title">Report Results</h2>
+              <div style="display: flex; gap: 12px;">
+                <button class="btn btn-secondary" id="btn-export-pdf" style="display: flex; align-items: center; gap: 8px;">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+                    <rect x="6" y="14" width="12" height="8"/>
+                  </svg>
+                  Export PDF
+                </button>
+                <button class="btn btn-primary" id="btn-export-excel" style="display: flex; align-items: center; gap: 8px;">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="16" y1="13" x2="8" y2="13"/>
+                    <line x1="16" y1="17" x2="8" y2="17"/>
+                  </svg>
+                  Export Excel
+                </button>
+              </div>
+            </div>
+
+            <div id="report-table-wrapper" class="tickets-table-wrapper" style="backdrop-filter: blur(10px); background: var(--bg-glass); border: 1px solid var(--border-glass); border-radius: var(--border-radius); padding: 24px; margin-bottom: 24px;">
+              <table class="tickets-table" style="width: 100%;">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Subject</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Customer</th>
+                    <th>Assignee</th>
+                    <th>Created At</th>
+                  </tr>
+                </thead>
+                <tbody id="report-table-body">
+                  <!-- Loaded dynamically -->
+                </tbody>
+              </table>
+              <div id="report-empty-state" class="empty-state" style="display: none; padding: 40px 0;">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                </svg>
+                <h3>No Matching Tickets</h3>
+                <p>Try adjusting your filter settings to generate the report.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. Login View -->
+        <section id="section-login" class="content-section auth-section">
+          <div class="auth-card">
+            <div class="brand" style="margin-bottom: 20px; justify-content: center;">
+              <svg class="brand-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="brand-text" style="font-size: 1.6rem;">OmniDesk</span>
+            </div>
+            <h2 style="text-align: center; margin-bottom: 8px;">Sign In</h2>
+            <p style="text-align: center; margin-bottom: 24px; color: var(--text-muted);">Access the ticketing panel</p>
+            
+            <form id="form-login">
+              <div class="form-group" style="margin-bottom: 16px;">
+                <label for="login-email">Email Address</label>
+                <input type="email" id="login-email" required placeholder="name@domain.com">
+              </div>
+              <div class="form-group" style="margin-bottom: 20px;">
+                <label for="login-password">Password</label>
+                <input type="password" id="login-password" required placeholder="Enter password">
+              </div>
+              <button type="submit" class="btn btn-primary" id="btn-login-submit" style="width: 100%; justify-content: center;">Sign In</button>
+            </form>
+            
+            <div class="auth-switch" style="text-align: center; margin-top: 20px; font-size: 0.85rem; color: var(--text-muted);">
+              Don't have an account? <a href="#" id="link-goto-register" style="color: var(--color-primary); text-decoration: none; font-weight: 500;">Create account</a>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. Register View -->
+        <section id="section-register" class="content-section auth-section">
+          <div class="auth-card">
+            <div class="brand" style="margin-bottom: 20px; justify-content: center;">
+              <svg class="brand-icon" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="brand-text" style="font-size: 1.6rem;">OmniDesk</span>
+            </div>
+            <h2 style="text-align: center; margin-bottom: 8px;">Create Account</h2>
+            <p style="text-align: center; margin-bottom: 24px; color: var(--text-muted);">Register for a customer support account</p>
+            
+            <form id="form-register">
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="register-username">Full Name</label>
+                <input type="text" id="register-username" required placeholder="e.g. John Doe">
+              </div>
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="register-email">Email Address</label>
+                <input type="email" id="register-email" required placeholder="name@domain.com">
+              </div>
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="register-brand">Brand (Optional)</label>
+                <select id="register-brand" style="cursor: pointer;">
+                  <option value="">Select Brand (Optional)</option>
+                  <option value="UNION">UNION</option>
+                  <option value="IBR">IBR</option>
+                  <option value="FRENCH">FRENCH</option>
+                  <option value="CORK">CORK</option>
+                  <option value="GROUP">GROUP</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="register-password">Password</label>
+                <input type="password" id="register-password" required placeholder="Minimum 10 characters">
+              </div>
+              <div class="form-group" style="margin-bottom: 16px;">
+                <label for="register-password-confirm">Confirm Password</label>
+                <input type="password" id="register-password-confirm" required placeholder="Re-enter password">
+              </div>
+              
+              <!-- Password Complexity Checklist -->
+              <div class="complexity-checklist" id="complexity-checklist">
+                <div class="complexity-item" id="req-length">
+                  <span class="chk-icon">✕</span> At least 10 characters
+                </div>
+                <div class="complexity-item" id="req-uppercase">
+                  <span class="chk-icon">✕</span> One uppercase letter (A-Z)
+                </div>
+                <div class="complexity-item" id="req-lowercase">
+                  <span class="chk-icon">✕</span> One lowercase letter (a-z)
+                </div>
+                <div class="complexity-item" id="req-number">
+                  <span class="chk-icon">✕</span> One number (0-9)
+                </div>
+                <div class="complexity-item" id="req-special">
+                  <span class="chk-icon">✕</span> One special character (!@#$%^&*)
+                </div>
+                <div class="complexity-item" id="req-match">
+                  <span class="chk-icon">✕</span> Passwords match
+                </div>
+              </div>
+
+              <button type="submit" class="btn btn-primary" id="btn-register-submit" disabled style="width: 100%; justify-content: center; margin-top: 15px;">Register Account</button>
+            </form>
+            
+            <div class="auth-switch" style="text-align: center; margin-top: 20px; font-size: 0.85rem; color: var(--text-muted);">
+              Already have an account? <a href="#" id="link-goto-login" style="color: var(--color-primary); text-decoration: none; font-weight: 500;">Sign In</a>
+            </div>
+          </div>
+        </section>
+
       </div>
 
       <!-- Theme Toggle Button -->
@@ -448,6 +738,101 @@
       </div>
     </div>
   </div>
+
+  <!-- Session Expired Re-authentication Modal -->
+  <div class="modal-overlay" id="reauth-modal">
+    <div class="modal-container" style="max-width: 400px; padding: 24px;">
+      <div class="modal-header" style="border-bottom: 1px solid var(--border-glass); padding-bottom: 12px; margin-bottom: 16px;">
+        <h2 style="font-size: 1.25rem;">Session Expired</h2>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 20px; color: var(--text-muted); font-size: 0.9rem; line-height: 1.4;">Your session has expired due to inactivity. Please re-authenticate to save your progress and submit.</p>
+        <form id="form-reauth">
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label for="reauth-email">Email Address</label>
+            <input type="email" id="reauth-email" required disabled style="opacity: 0.65; cursor: not-allowed; width: 100%;">
+          </div>
+          <div class="form-group" style="margin-bottom: 24px;">
+            <label for="reauth-password">Password</label>
+            <input type="password" id="reauth-password" required placeholder="Enter password" autofocus style="width: 100%;">
+          </div>
+          <div class="form-actions" style="margin-top: 24px; display: flex; justify-content: flex-end; gap: 12px;">
+            <button type="button" class="btn btn-secondary" id="btn-reauth-logout">Sign Out</button>
+            <button type="submit" class="btn btn-primary" id="btn-reauth-submit">Confirm Password</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- User CRUD Modal overlay -->
+  <div class="modal-overlay" id="user-modal">
+    <div class="modal-container" style="max-width: 450px; padding: 24px;">
+      <div class="modal-header" style="border-bottom: 1px solid var(--border-glass); padding-bottom: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+        <h2 id="user-modal-title" style="font-size: 1.25rem; color: var(--text-primary);">Add New User</h2>
+        <button class="close-modal" id="btn-close-user-modal" style="background: none; border: none; color: var(--text-muted); cursor: pointer;">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="form-user" class="ticket-form">
+          <input type="hidden" id="user-id-field">
+          
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label for="user-username-field" style="display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted);">Full Name</label>
+            <input type="text" id="user-username-field" required placeholder="e.g. Michael Scott" class="user-modal-input">
+          </div>
+          
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label for="user-email-field" style="display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted);">Email Address</label>
+            <input type="email" id="user-email-field" required placeholder="e.g. michael@dundermifflin.com" class="user-modal-input">
+          </div>
+          
+          <div class="form-group" style="margin-bottom: 16px;" id="user-password-group">
+            <label for="user-password-field" style="display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted);">Password</label>
+            <input type="password" id="user-password-field" placeholder="Minimum 10 chars (Required for new users)" class="user-modal-input">
+            
+            <div class="complexity-checklist" id="user-password-complexity" style="margin-top: 8px; display: none; padding: 10px; background: rgba(0,0,0,0.1); border-radius: 8px;">
+              <div class="complexity-item" id="user-req-length" style="font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 6px; margin-bottom: 4px;"><span class="chk-icon" style="color: #ef4444;">✕</span> 10+ characters</div>
+              <div class="complexity-item" id="user-req-uppercase" style="font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 6px; margin-bottom: 4px;"><span class="chk-icon" style="color: #ef4444;">✕</span> 1 uppercase (A-Z)</div>
+              <div class="complexity-item" id="user-req-lowercase" style="font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 6px; margin-bottom: 4px;"><span class="chk-icon" style="color: #ef4444;">✕</span> 1 lowercase (a-z)</div>
+              <div class="complexity-item" id="user-req-number" style="font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 6px; margin-bottom: 4px;"><span class="chk-icon" style="color: #ef4444;">✕</span> 1 number (0-9)</div>
+              <div class="complexity-item" id="user-req-special" style="font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 6px;"><span class="chk-icon" style="color: #ef4444;">✕</span> 1 special (!@#$%^&*)</div>
+            </div>
+          </div>
+          
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label for="user-role-field" style="display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted);">Role</label>
+            <select id="user-role-field" class="user-modal-input" style="cursor: pointer;">
+              <option value="Customer">Customer (Client)</option>
+              <option value="Agent">Agent (Support Staff)</option>
+            </select>
+          </div>
+          
+          <div class="form-group" style="margin-bottom: 24px;">
+            <label for="user-brand-field" style="display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted);">Brand (Optional)</label>
+            <select id="user-brand-field" class="user-modal-input" style="cursor: pointer;">
+              <option value="">Select Brand (Optional)</option>
+              <option value="UNION">UNION</option>
+              <option value="IBR">IBR</option>
+              <option value="FRENCH">FRENCH</option>
+              <option value="CORK">CORK</option>
+              <option value="GROUP">GROUP</option>
+            </select>
+          </div>
+          
+          <div class="form-actions" style="display: flex; justify-content: flex-end; gap: 12px;">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-user-modal">Cancel</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-user">Save User</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
 
   <!-- Toast Notification System -->
   <div class="toast-container" id="toast-container"></div>

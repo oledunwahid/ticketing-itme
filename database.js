@@ -1,5 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const bcrypt = require('bcryptjs');
 
 const dbPath = path.resolve(__dirname, 'tickets.db');
 const db = new sqlite3.Database(dbPath, (err) => {
@@ -16,6 +17,27 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initDatabase() {
   db.serialize(() => {
+    // Create users table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT CHECK( role IN ('Customer', 'Agent') ) DEFAULT 'Customer',
+        brand TEXT CHECK( brand IN ('UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP') ) DEFAULT NULL,
+        failed_attempts INTEGER DEFAULT 0,
+        locked_until DATETIME DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (!err) {
+        db.run("ALTER TABLE users ADD COLUMN brand TEXT CHECK( brand IN ('UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP') ) DEFAULT NULL", (alterErr) => {
+          // Ignore error if column already exists
+        });
+      }
+    });
+
     // Create tickets table
     db.run(`
       CREATE TABLE IF NOT EXISTS tickets (
@@ -45,7 +67,7 @@ function initDatabase() {
       )
     `);
 
-    // Create attachments table
+    // Create attachments table with uploaded_by referencing users
     db.run(`
       CREATE TABLE IF NOT EXISTS attachments (
         id TEXT PRIMARY KEY,
@@ -54,15 +76,17 @@ function initDatabase() {
         file_name TEXT NOT NULL,
         file_size INTEGER NOT NULL,
         mime_type TEXT NOT NULL,
+        uploaded_by INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+        FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
       )
     `);
 
     // Check if we need to seed the tables
-    db.get('SELECT COUNT(*) AS count FROM tickets', (err, row) => {
+    db.get('SELECT COUNT(*) AS count FROM users', (err, row) => {
       if (err) {
-        console.error('Error checking ticket count:', err.message);
+        console.error('Error checking users count:', err.message);
         return;
       }
 
@@ -75,6 +99,28 @@ function initDatabase() {
 }
 
 function seedData() {
+  const defaultPasswordHash = bcrypt.hashSync('Password123!', 10);
+  
+  const seedUsers = [
+    { username: 'Agent Admin', email: 'agent@omnidesk.com', password_hash: defaultPasswordHash, role: 'Agent' },
+    { username: 'John Doe', email: 'john.doe@example.com', password_hash: defaultPasswordHash, role: 'Customer' },
+    { username: 'Alice Smith', email: 'alice.smith@techcorp.io', password_hash: defaultPasswordHash, role: 'Customer' },
+    { username: 'Michael Scott', email: 'michael.scott@dundermifflin.com', password_hash: defaultPasswordHash, role: 'Customer' },
+    { username: 'Pam Beesly', email: 'pam@dundermifflin.com', password_hash: defaultPasswordHash, role: 'Customer' }
+  ];
+
+  const userStmt = db.prepare(`
+    INSERT INTO users (username, email, password_hash, role)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  seedUsers.forEach(u => {
+    userStmt.run(u.username, u.email, u.password_hash, u.role, (err) => {
+      if (err) console.error('Error seeding user:', err.message);
+    });
+  });
+  userStmt.finalize();
+
   const initialTickets = [
     {
       title: 'Unable to access dashboard after password reset',
@@ -119,7 +165,7 @@ function seedData() {
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
-  initialTickets.forEach((t, index) => {
+  initialTickets.forEach((t) => {
     stmt.run(t.title, t.description, t.status, t.priority, t.customer_name, t.customer_email, t.assignee_name, function(err) {
       if (err) {
         console.error('Error seeding ticket:', err.message);

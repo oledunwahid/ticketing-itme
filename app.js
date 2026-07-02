@@ -5,10 +5,14 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const db = require('./database');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'omnidesk-super-secret-key-2026-xyz';
 
 // Setup directories for uploads and temp uploads
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -24,15 +28,352 @@ const upload = multer({ dest: TEMP_DIR });
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 app.use(morgan('dev'));
 
-// Serve static frontend files
-app.use(express.static(path.join(__dirname, 'public')));
+
+
+// Auth Middleware
+function requireAuth(req, res, next) {
+  const token = req.cookies.token;
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      res.clearCookie('token');
+      return res.status(401).json({ error: 'Unauthorized. Session expired or invalid.' });
+    }
+
+    // Absolute session expiration check (24 hours)
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (decoded.absolute_exp && nowSeconds > decoded.absolute_exp) {
+      res.clearCookie('token');
+      return res.status(401).json({ error: 'Unauthorized. Session absolute lifetime expired.' });
+    }
+
+    // sliding inactivity window: refresh cookie for another 30 mins
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 30 * 60 * 1000 // 30 minutes
+    });
+
+    req.user = decoded;
+    next();
+  });
+}
+
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized.' });
+    }
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden. Access denied.' });
+    }
+    next();
+  };
+}
+
+// ==========================================================================
+// Authentication Endpoints
+// ==========================================================================
+
+// Register
+app.post('/api/auth/register', (req, res) => {
+  const { username, email, password, passwordConfirm, brand } = req.body;
+
+  if (!username || !email || !password || !passwordConfirm) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  if (password !== passwordConfirm) {
+    return res.status(400).json({ error: 'Passwords do not match' });
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address format' });
+  }
+
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
+  if (!passwordRegex.test(password)) {
+    return res.status(400).json({ error: 'Password does not meet complexity requirements' });
+  }
+
+  if (brand !== undefined && brand !== null && brand !== '') {
+    const validBrands = ['UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP'];
+    if (!validBrands.includes(brand)) {
+      return res.status(400).json({ error: 'Invalid brand value' });
+    }
+  }
+
+  db.get('SELECT id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)', [email, username], (err, existingUser) => {
+    if (err) {
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username or email already in use' });
+    }
+
+    const passwordHash = bcrypt.hashSync(password, 10);
+    db.run(
+      'INSERT INTO users (username, email, password_hash, role, brand) VALUES (?, ?, ?, "Customer", ?)',
+      [username, email.toLowerCase(), passwordHash, brand || null],
+      function(insertErr) {
+        if (insertErr) {
+          return res.status(500).json({ error: 'Failed to register user' });
+        }
+        res.status(201).json({ message: 'Registration successful! Please log in.' });
+      }
+    );
+  });
+});
+
+// Login
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  db.get('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [email], (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    if (!bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+
+
+    const absoluteExp = Math.floor(Date.now() / 1000) + 24 * 60 * 60; // 24 hours
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        brand: user.brand,
+        absolute_exp: absoluteExp
+      },
+      JWT_SECRET
+    );
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 30 * 60 * 1000 // 30 minutes
+    });
+
+    res.json({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      brand: user.brand
+    });
+  });
+});
+
+// Logout
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+// Me (Session Verification)
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({
+    id: req.user.id,
+    username: req.user.username,
+    email: req.user.email,
+    role: req.user.role,
+    brand: req.user.brand
+  });
+});
+
+// ==========================================================================
+// User Management Endpoints (Agent Only)
+// ==========================================================================
+
+// Get all users
+app.get('/api/users', requireAuth, requireRole(['Agent']), (req, res) => {
+  db.all('SELECT id, username, email, role, brand, created_at FROM users ORDER BY id ASC', [], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows);
+  });
+});
+
+// Create user
+app.post('/api/users', requireAuth, requireRole(['Agent']), (req, res) => {
+  const { username, email, password, role, brand } = req.body;
+
+  if (!username || !email || !password || !role) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  const validRoles = ['Customer', 'Agent'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ error: 'Invalid role value' });
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address format' });
+  }
+
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
+  if (!passwordRegex.test(password)) {
+    return res.status(400).json({ error: 'Password does not meet complexity requirements' });
+  }
+
+  if (brand !== undefined && brand !== null && brand !== '') {
+    const validBrands = ['UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP'];
+    if (!validBrands.includes(brand)) {
+      return res.status(400).json({ error: 'Invalid brand value' });
+    }
+  }
+
+  db.get('SELECT id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)', [email, username], (err, existingUser) => {
+    if (err) {
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username or email already in use' });
+    }
+
+    const passwordHash = bcrypt.hashSync(password, 10);
+    db.run(
+      'INSERT INTO users (username, email, password_hash, role, brand) VALUES (?, ?, ?, ?, ?)',
+      [username, email.toLowerCase(), passwordHash, role, brand || null],
+      function(insertErr) {
+        if (insertErr) {
+          return res.status(500).json({ error: 'Failed to create user' });
+        }
+        res.status(201).json({ id: this.lastID, username, email, role, brand: brand || null });
+      }
+    );
+  });
+});
+
+// Edit user
+app.patch('/api/users/:id', requireAuth, requireRole(['Agent']), (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const { username, email, role, password, brand } = req.body;
+
+  if (isNaN(userId)) {
+    return res.status(400).json({ error: 'Invalid user ID' });
+  }
+
+  const updates = [];
+  const params = [];
+
+  if (username) {
+    updates.push('username = ?');
+    params.push(username);
+  }
+
+  if (email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email address format' });
+    }
+    updates.push('email = ?');
+    params.push(email.toLowerCase());
+  }
+
+  if (role) {
+    const validRoles = ['Customer', 'Agent'];
+    if (!validRoles.includes(role)) {
+      return res.status(400).json({ error: 'Invalid role value' });
+    }
+
+    // Prevent self-demotion
+    if (userId === req.user.id && role !== 'Agent') {
+      return res.status(400).json({ error: 'You cannot change your own Agent role.' });
+    }
+
+    updates.push('role = ?');
+    params.push(role);
+  }
+
+  if (password) {
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
+    if (!passwordRegex.test(password)) {
+      return res.status(400).json({ error: 'Password does not meet complexity requirements' });
+    }
+    const passwordHash = bcrypt.hashSync(password, 10);
+    updates.push('password_hash = ?');
+    params.push(passwordHash);
+  }
+
+  if (brand !== undefined) {
+    const validBrands = [null, '', 'UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP'];
+    if (brand && !validBrands.includes(brand)) {
+      return res.status(400).json({ error: 'Invalid brand value' });
+    }
+    updates.push('brand = ?');
+    params.push(brand || null);
+  }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No fields to update provided' });
+  }
+
+  const query = `UPDATE users SET ${updates.join(', ')} WHERE id = ?`;
+  params.push(userId);
+
+  db.run(query, params, function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ id: userId, username, email, role, brand });
+  });
+});
+
+// Delete user
+app.delete('/api/users/:id', requireAuth, requireRole(['Agent']), (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+
+  if (isNaN(userId)) {
+    return res.status(400).json({ error: 'Invalid user ID' });
+  }
+
+  // Prevent self-deletion
+  if (userId === req.user.id) {
+    return res.status(400).json({ error: 'You cannot delete your own logged-in account.' });
+  }
+
+  db.run('DELETE FROM users WHERE id = ?', [userId], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ success: true });
+  });
+});
 
 // API Routes
 
 // 1. Get statistics for the dashboard
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', requireAuth, requireRole(['Agent']), (req, res) => {
   const stats = {
     total: 0,
     new: 0,
@@ -68,10 +409,16 @@ app.get('/api/stats', (req, res) => {
 });
 
 // 2. Get all tickets (with optional search and filter query parameters)
-app.get('/api/tickets', (req, res) => {
+app.get('/api/tickets', requireAuth, (req, res) => {
   const { status, priority, search } = req.query;
   let query = 'SELECT * FROM tickets WHERE 1=1';
   const params = [];
+
+  // RBAC isolation: Customers only see their own tickets
+  if (req.user.role === 'Customer') {
+    query += ' AND customer_email = ?';
+    params.push(req.user.email);
+  }
 
   if (status) {
     query += ' AND status = ?';
@@ -108,7 +455,7 @@ app.get('/api/tickets', (req, res) => {
 });
 
 // 3. Get single ticket with comments and attachments
-app.get('/api/tickets/:id', (req, res) => {
+app.get('/api/tickets/:id', requireAuth, (req, res) => {
   const ticketId = req.params.id;
 
   db.get('SELECT * FROM tickets WHERE id = ?', [ticketId], (err, ticket) => {
@@ -117,6 +464,11 @@ app.get('/api/tickets/:id', (req, res) => {
     }
     if (!ticket) {
       return res.status(404).json({ error: 'Ticket not found' });
+    }
+
+    // RBAC isolation: Customers only see their own tickets
+    if (req.user.role === 'Customer' && ticket.customer_email !== req.user.email) {
+      return res.status(403).json({ error: 'Forbidden. Access denied.' });
     }
 
     db.all('SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC', [ticketId], (err, comments) => {
@@ -135,10 +487,18 @@ app.get('/api/tickets/:id', (req, res) => {
 });
 
 // 4. Create a new ticket (with optional attachments)
-app.post('/api/tickets', (req, res) => {
+app.post('/api/tickets', requireAuth, (req, res) => {
   const { title, description, priority, customer_name, customer_email, attachmentIds } = req.body;
 
-  if (!title || !description || !customer_name || !customer_email) {
+  // For Customer, force their authenticated credentials
+  let finalName = customer_name;
+  let finalEmail = customer_email;
+  if (req.user.role === 'Customer') {
+    finalName = req.user.username;
+    finalEmail = req.user.email;
+  }
+
+  if (!title || !description || !finalName || !finalEmail) {
     return res.status(400).json({ error: 'Missing required fields: title, description, customer_name, customer_email' });
   }
 
@@ -150,7 +510,7 @@ app.post('/api/tickets', (req, res) => {
     VALUES (?, ?, 'New', ?, ?, ?, 'Unassigned')
   `;
 
-  db.run(query, [title, description, ticketPriority, customer_name, customer_email], function(err) {
+  db.run(query, [title, description, ticketPriority, finalName, finalEmail], function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -181,8 +541,8 @@ app.post('/api/tickets', (req, res) => {
   });
 });
 
-// 5. Update a ticket (status, priority, assignee)
-app.patch('/api/tickets/:id', (req, res) => {
+// 5. Update a ticket (status, priority, assignee) - Agent Only
+app.patch('/api/tickets/:id', requireAuth, requireRole(['Agent']), (req, res) => {
   const ticketId = req.params.id;
   const { status, priority, assignee_name } = req.body;
 
@@ -260,21 +620,16 @@ app.patch('/api/tickets/:id', (req, res) => {
 });
 
 // 6. Add comment/reply to ticket
-app.post('/api/tickets/:id/comments', (req, res) => {
+app.post('/api/tickets/:id/comments', requireAuth, (req, res) => {
   const ticketId = req.params.id;
-  const { author_name, author_role, message } = req.body;
+  const { message } = req.body;
 
-  if (!author_name || !author_role || !message) {
-    return res.status(400).json({ error: 'Missing required fields: author_name, author_role, message' });
+  if (!message) {
+    return res.status(400).json({ error: 'Missing required fields: message' });
   }
 
-  const validRoles = ['Customer', 'Agent'];
-  if (!validRoles.includes(author_role)) {
-    return res.status(400).json({ error: 'Invalid author_role. Must be "Customer" or "Agent"' });
-  }
-
-  // Verify ticket exists
-  db.get('SELECT id, status FROM tickets WHERE id = ?', [ticketId], (err, ticket) => {
+  // Verify ticket exists and access control
+  db.get('SELECT id, status, customer_email FROM tickets WHERE id = ?', [ticketId], (err, ticket) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -282,10 +637,18 @@ app.post('/api/tickets/:id/comments', (req, res) => {
       return res.status(404).json({ error: 'Ticket not found' });
     }
 
+    // RBAC: Customer can only comment on their own tickets
+    if (req.user.role === 'Customer' && ticket.customer_email !== req.user.email) {
+      return res.status(403).json({ error: 'Forbidden. Access denied.' });
+    }
+
+    const authorName = req.user.username;
+    const authorRole = req.user.role; // Customer or Agent
+
     // Insert comment
     db.run(
       'INSERT INTO comments (ticket_id, author_name, author_role, message) VALUES (?, ?, ?, ?)',
-      [ticketId, author_name, author_role, message],
+      [ticketId, authorName, authorRole, message],
       function(err) {
         if (err) {
           return res.status(500).json({ error: err.message });
@@ -294,11 +657,10 @@ app.post('/api/tickets/:id/comments', (req, res) => {
         const newCommentId = this.lastID;
 
         // Automatically update the ticket updated_at field
-        // If an agent replies, we might want to change status from "New" to "Open" automatically, just like Zendesk
         let statusUpdateSql = 'UPDATE tickets SET updated_at = CURRENT_TIMESTAMP';
         const statusUpdateParams = [];
         
-        if (author_role === 'Agent' && ticket.status === 'New') {
+        if (authorRole === 'Agent' && ticket.status === 'New') {
           statusUpdateSql += ', status = ?';
           statusUpdateParams.push('Open');
           
@@ -398,7 +760,7 @@ function validateFile(filePath, mimeType, size) {
 }
 
 // 1. Direct upload for images / small files
-app.post('/api/attachments/upload', upload.single('file'), (req, res) => {
+app.post('/api/attachments/upload', requireAuth, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded.' });
   }
@@ -426,8 +788,8 @@ app.post('/api/attachments/upload', upload.single('file'), (req, res) => {
   const fileUrl = `/api/attachments/${fileId}`;
 
   db.run(
-    'INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type) VALUES (?, NULL, ?, ?, ?, ?)',
-    [fileId, fileUrl, sanitizedName, size, mimetype],
+    'INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type, uploaded_by) VALUES (?, NULL, ?, ?, ?, ?, ?)',
+    [fileId, fileUrl, sanitizedName, size, mimetype, req.user.id],
     (err) => {
       if (err) {
         if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
@@ -439,7 +801,7 @@ app.post('/api/attachments/upload', upload.single('file'), (req, res) => {
 });
 
 // 2. Chunked upload endpoint (large files / videos)
-app.post('/api/attachments/upload-chunk', upload.single('chunk'), (req, res) => {
+app.post('/api/attachments/upload-chunk', requireAuth, upload.single('chunk'), (req, res) => {
   const { fileId, chunkIndex, totalChunks, fileName, mimeType, fileSize } = req.body;
   
   if (!req.file) {
@@ -501,8 +863,8 @@ app.post('/api/attachments/upload-chunk', upload.single('chunk'), (req, res) => 
     const fileUrl = `/api/attachments/${fileId}`;
 
     db.run(
-      'INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type) VALUES (?, NULL, ?, ?, ?, ?)',
-      [fileId, fileUrl, sanitizedName, size, mimeType],
+      'INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type, uploaded_by) VALUES (?, NULL, ?, ?, ?, ?, ?)',
+      [fileId, fileUrl, sanitizedName, size, mimeType, req.user.id],
       (err) => {
         if (err) {
           if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
@@ -517,12 +879,17 @@ app.post('/api/attachments/upload-chunk', upload.single('chunk'), (req, res) => 
 });
 
 // 3. Delete attachment
-app.delete('/api/attachments/:id', (req, res) => {
+app.delete('/api/attachments/:id', requireAuth, (req, res) => {
   const attachmentId = req.params.id;
   
   db.get('SELECT * FROM attachments WHERE id = ?', [attachmentId], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!row) return res.status(404).json({ error: 'Attachment not found.' });
+
+    // RBAC: Customer can only delete their own uploaded attachments
+    if (req.user.role === 'Customer' && row.uploaded_by !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden. Access denied.' });
+    }
 
     db.run('DELETE FROM attachments WHERE id = ?', [attachmentId], (deleteErr) => {
       if (deleteErr) return res.status(500).json({ error: deleteErr.message });
@@ -541,7 +908,7 @@ app.delete('/api/attachments/:id', (req, res) => {
 });
 
 // 4. Secure File Access Point (Access Control)
-app.get('/api/attachments/:id', (req, res) => {
+app.get('/api/attachments/:id', requireAuth, (req, res) => {
   const attachmentId = req.params.id;
   
   db.get('SELECT * FROM attachments WHERE id = ?', [attachmentId], (err, row) => {
@@ -552,16 +919,47 @@ app.get('/api/attachments/:id', (req, res) => {
       return res.status(404).json({ error: 'Attachment reference not found.' });
     }
 
-    const filePath = path.join(UPLOADS_DIR, attachmentId);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'File not found on server disk.' });
+    const sendFileResponse = () => {
+      const filePath = path.join(UPLOADS_DIR, attachmentId);
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found on server disk.' });
+      }
+
+      res.setHeader('Content-Type', row.mime_type);
+      const safeName = encodeURIComponent(row.file_name);
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeName}`);
+      res.sendFile(filePath);
+    };
+
+    // RBAC: Agents see all. Customers must either have uploaded it OR be linked to the ticket
+    if (req.user.role === 'Agent') {
+      return sendFileResponse();
     }
 
-    res.setHeader('Content-Type', row.mime_type);
-    const safeName = encodeURIComponent(row.file_name);
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeName}`);
-    res.sendFile(filePath);
+    // Customer Checks
+    if (row.ticket_id) {
+      db.get('SELECT customer_email FROM tickets WHERE id = ?', [row.ticket_id], (tErr, ticket) => {
+        if (tErr) return res.status(500).json({ error: tErr.message });
+        if (!ticket || ticket.customer_email !== req.user.email) {
+          return res.status(403).json({ error: 'Forbidden. Access denied.' });
+        }
+        sendFileResponse();
+      });
+    } else {
+      if (row.uploaded_by !== req.user.id) {
+        return res.status(403).json({ error: 'Forbidden. Access denied.' });
+      }
+      sendFileResponse();
+    }
   });
+});
+
+// Serve static frontend files
+app.use(express.static(path.join(__dirname, 'public')));
+
+// SPA Wildcard Route: serve index.html for all non-api routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Fallback error handling middleware

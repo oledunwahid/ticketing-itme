@@ -1,0 +1,21 @@
+{
+  "name": "ticketing-app",
+  "version": "1.0.0",
+  "description": "Zendesk-inspired ticketing system built with Node.js, Express, and SQLite.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.2.0",
+    "sqlite3": "^5.1.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}

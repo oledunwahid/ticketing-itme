@@ -563,6 +563,41 @@ function setupEventListeners() {
       }
     });
   });
+
+  // Dashboard Stat Cards Click Handlers
+  const statCards = [
+    { selector: '.stat-card.stat-total', filters: { status: '', priority: '', search: '' } },
+    { selector: '.stat-card.stat-open', filters: { status: 'Open', priority: '', search: '' } },
+    { selector: '.stat-card.stat-pending', filters: { status: 'Pending', priority: '', search: '' } },
+    { selector: '.stat-card.stat-urgent', filters: { status: '', priority: 'Urgent', search: '' } }
+  ];
+
+  statCards.forEach(({ selector, filters }) => {
+    const cardEl = document.querySelector(selector);
+    if (cardEl) {
+      cardEl.addEventListener('click', () => {
+        state.filters.status = filters.status;
+        state.filters.priority = filters.priority;
+        state.filters.search = filters.search;
+        updateFiltersIndicator();
+        navigateTo('/tickets');
+      });
+    }
+  });
+
+  // Dashboard Status Distribution Click Handlers
+  document.querySelectorAll('.status-dist-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const statusValue = item.getAttribute('data-status');
+      if (statusValue) {
+        state.filters.status = statusValue;
+        state.filters.priority = '';
+        state.filters.search = '';
+        updateFiltersIndicator();
+        navigateTo('/tickets');
+      }
+    });
+  });
 }
 
 function resetPasswordVisibility() {
@@ -1349,6 +1384,10 @@ function setupDetailActionListeners(ticket) {
 function updateFiltersIndicator() {
   const isFiltered = state.filters.status || state.filters.priority || state.filters.search;
   elements.btnClearFilters.style.display = isFiltered ? 'inline-block' : 'none';
+
+  if (elements.filterStatus) elements.filterStatus.value = state.filters.status || '';
+  if (elements.filterPriority) elements.filterPriority.value = state.filters.priority || '';
+  if (elements.globalSearch) elements.globalSearch.value = state.filters.search || '';
 
   if (state.filters.search) {
     elements.searchIndicator.style.display = 'block';

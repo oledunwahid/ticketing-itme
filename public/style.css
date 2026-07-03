@@ -2504,3 +2504,61 @@ body.light-theme select option {
   background-color: #ffffff;
   color: #0f172a;
 }
+
+/* --- Password Visibility Toggle --- */
+.password-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.password-wrapper input {
+  width: 100%;
+  padding-right: 44px !important; /* Make room for the toggle button */
+}
+
+.password-toggle {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s ease, opacity 0.2s ease;
+  z-index: 10;
+  border-radius: 4px;
+}
+
+.password-toggle:hover {
+  color: var(--text-main);
+}
+
+.password-toggle:focus {
+  outline: none;
+  color: var(--color-primary);
+}
+
+.password-toggle svg {
+  display: block;
+}
+
+.password-toggle .eye-open {
+  display: none;
+}
+
+.password-toggle .eye-closed {
+  display: block;
+}
+
+.password-wrapper.show-password .password-toggle .eye-open {
+  display: block;
+}
+
+.password-wrapper.show-password .password-toggle .eye-closed {
+  display: none;
+}

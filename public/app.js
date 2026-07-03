@@ -547,6 +547,32 @@ function setupEventListeners() {
       validateUserPasswordComplexity(e.target.value);
     });
   }
+
+  // Initialize Password Toggle Buttons
+  document.querySelectorAll('.password-toggle').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const wrapper = btn.closest('.password-wrapper');
+      const input = wrapper.querySelector('input');
+      if (input.type === 'password') {
+        input.type = 'text';
+        wrapper.classList.add('show-password');
+      } else {
+        input.type = 'password';
+        wrapper.classList.remove('show-password');
+      }
+    });
+  });
+}
+
+function resetPasswordVisibility() {
+  document.querySelectorAll('.password-wrapper').forEach(wrapper => {
+    wrapper.classList.remove('show-password');
+    const input = wrapper.querySelector('input');
+    if (input) {
+      input.type = 'password';
+    }
+  });
 }
 
 // --- Navigation & Routing Controllers ---
@@ -588,6 +614,7 @@ async function checkAuth() {
 }
 
 function handleRouting() {
+  resetPasswordVisibility();
   const path = window.location.pathname;
   
   if (path === '/login' || path === '/register') {
@@ -850,6 +877,8 @@ function openReauthModal() {
     const reauthModal = document.getElementById('reauth-modal');
     const reauthEmail = document.getElementById('reauth-email');
     const reauthPassword = document.getElementById('reauth-password');
+    
+    resetPasswordVisibility();
     
     if (reauthEmail) reauthEmail.value = state.user ? state.user.email : '';
     if (reauthPassword) reauthPassword.value = '';
@@ -1829,6 +1858,7 @@ function closeUserModal() {
   if (elements.userModal) {
     elements.userModal.classList.remove('active');
     elements.formUser.reset();
+    resetPasswordVisibility();
   }
 }
 

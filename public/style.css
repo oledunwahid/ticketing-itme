@@ -382,6 +382,7 @@ p {
   border: 1px solid var(--border-glass);
   border-radius: var(--border-radius);
   padding: 24px;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -568,6 +569,17 @@ p {
   background-color: rgba(255, 255, 255, 0.01);
   border-radius: 6px;
   border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.status-dist-item:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+  transform: translateX(4px);
+}
+
+body.light-theme .status-dist-item:hover {
+  background-color: rgba(0, 0, 0, 0.03);
 }
 
 .status-dist-item:nth-child(1) {

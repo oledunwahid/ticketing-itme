@@ -1101,7 +1101,7 @@ function renderTicketsTable(tickets) {
 
     row.innerHTML = `
       <td>
-        <div class="font-semibold" style="color:#fff;">${ticket.title}</div>
+        <div class="font-semibold ticket-title-text">${ticket.title}</div>
         <div style="font-size: 0.75rem; color: var(--text-muted); margin-top:2px;">#${ticket.id} • ${ticket.assignee_name}</div>
       </td>
       <td>

@@ -2574,3 +2574,12 @@ body.light-theme select option {
 .password-wrapper.show-password .password-toggle .eye-closed {
   display: none;
 }
+
+/* --- Ticket Title Theme Adaptation --- */
+.ticket-title-text {
+  color: #fff;
+}
+
+body.light-theme .ticket-title-text {
+  color: #0f172a;
+}

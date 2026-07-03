@@ -1,3 +1,7 @@
+/* ==========================================================================
+   IT-ME Ticketing — Database Layer
+   Node.js + SQLite (sqlite3). Additive, data-preserving migrations.
+   ========================================================================== */
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const bcrypt = require('bcryptjs');
@@ -6,198 +10,619 @@ const dbPath = path.resolve(__dirname, 'tickets.db');
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to the SQLite database at:', dbPath);
-    db.run("PRAGMA foreign_keys = ON", (pragmaErr) => {
-      if (pragmaErr) console.error("Error enabling foreign keys:", pragmaErr.message);
-    });
-    initDatabase();
+    process.exit(1);
   }
 });
 
-function initDatabase() {
-  db.serialize(() => {
-    // Create users table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT CHECK( role IN ('Customer', 'Agent') ) DEFAULT 'Customer',
-        brand TEXT CHECK( brand IN ('UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP') ) DEFAULT NULL,
-        failed_attempts INTEGER DEFAULT 0,
-        locked_until DATETIME DEFAULT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
-      if (!err) {
-        db.run("ALTER TABLE users ADD COLUMN brand TEXT CHECK( brand IN ('UNION', 'IBR', 'FRENCH', 'CORK', 'GROUP') ) DEFAULT NULL", (alterErr) => {
-          // Ignore error if column already exists
-        });
-      }
+// --- Promisified helpers ---------------------------------------------------
+const run = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.run(sql, params, function (e) {
+      if (e) reject(e);
+      else resolve(this);
     });
+  });
+const get = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.get(sql, params, (e, row) => (e ? reject(e) : resolve(row)));
+  });
+const all = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.all(sql, params, (e, rows) => (e ? reject(e) : resolve(rows)));
+  });
+const exec = (sql) =>
+  new Promise((resolve, reject) => {
+    db.exec(sql, (e) => (e ? reject(e) : resolve()));
+  });
 
-    // Create tickets table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS tickets (
+// Expose promise helpers to the rest of the app.
+db.pAll = all;
+db.pGet = get;
+db.pRun = run;
+db.pExec = exec;
+
+// --- Reference data --------------------------------------------------------
+const BRANDS = [
+  { code: 'UNION', name: 'Union' },
+  { code: 'CNS', name: 'CNS' },
+  { code: 'FRENCH', name: 'French' },
+  { code: 'IBR', name: 'IBR' },
+  { code: 'IND', name: 'Independent' },
+];
+
+// display_label lets us collapse MILGI/MILPIK → MILBISPIK on reports without
+// mutating raw ticket storage. Default display_label = code.
+const OUTLETS = [
+  // UNION
+  ['UTP', 'UNION'], ['UPKW', 'UNION'], ['UPS', 'UNION'], ['USC', 'UNION'],
+  ['UCP', 'UNION'], ['UGI', 'UNION'], ['UPIM', 'UNION'], ['UPIK', 'UNION'],
+  ['UMKG', 'UNION'], ['USMS', 'UNION'], ['UMPI', 'UNION'],
+  // CNS
+  ['CSPI', 'CNS'], ['CSPP', 'CNS'], ['CSSG', 'CNS'], ['BLCS', 'CNS'],
+  // FRENCH
+  ['LWY-OAK', 'FRENCH'], ['BAB-SEN', 'FRENCH'], ['PIE-SNPT', 'FRENCH'],
+  // IBR
+  ['ROMSCBD', 'IBR'], ['ROMPIM', 'IBR'], ['BISSCBD', 'IBR'], ['BISPIK', 'IBR'],
+  ['MILGI', 'IBR', 'MILBISPIK'], ['MILPIK', 'IBR', 'MILBISPIK'],
+  // IND
+  ['IND1', 'IND'],
+];
+
+const DEPARTMENTS = [
+  { code: 'IT', name: 'Information Technology' },
+  { code: 'ME', name: 'Mechanical Engineering' },
+];
+
+const CATEGORIES = {
+  IT: [
+    'POS System', 'Printer', 'Network / Internet', 'WiFi', 'CCTV',
+    'EDC / Payment Device', 'Computer / Laptop', 'Email / Account',
+    'Software', 'Hardware', 'Other IT',
+  ],
+  ME: [
+    'AC', 'Electrical', 'Plumbing', 'Kitchen Equipment', 'Building / Facility',
+    'Furniture / Fixture', 'Lighting', 'Exhaust / Ventilation', 'Gas / Utility',
+    'Other Maintenance',
+  ],
+};
+
+// New role set (old Agent→SuperAdmin, old Customer→Requestor on migration).
+const APP_ROLES = [
+  'Requestor', 'SuperAdmin', 'AdminIT', 'AdminME',
+  'TechnicianIT', 'TechnicianME', 'Leader',
+];
+
+// --- Migration runner ------------------------------------------------------
+async function applied(name) {
+  const row = await get('SELECT 1 FROM schema_migrations WHERE name = ?', [name]);
+  return !!row;
+}
+async function markApplied(name) {
+  await run('INSERT INTO schema_migrations (name) VALUES (?)', [name]);
+}
+async function migrate(name, fn) {
+  if (await applied(name)) return;
+  console.log(`  ↳ applying migration: ${name}`);
+  await fn();
+  await markApplied(name);
+}
+
+// column-exists guard for additive ALTERs
+async function hasColumn(table, column) {
+  const cols = await all(`PRAGMA table_info(${table})`);
+  return cols.some((c) => c.name === column);
+}
+async function addColumn(table, column, definition) {
+  if (!(await hasColumn(table, column))) {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+// --- Base tables (fresh install path) --------------------------------------
+async function createBaseTables() {
+  await exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      name TEXT PRIMARY KEY,
+      applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'Requestor',
+      brand TEXT,
+      failed_attempts INTEGER DEFAULT 0,
+      locked_until DATETIME DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS tickets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT DEFAULT 'New',
+      priority TEXT DEFAULT 'Low',
+      customer_name TEXT,
+      customer_email TEXT,
+      assignee_name TEXT DEFAULT 'Unassigned',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL,
+      author_name TEXT NOT NULL,
+      author_role TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS attachments (
+      id TEXT PRIMARY KEY,
+      ticket_id INTEGER,
+      file_url TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
+      mime_type TEXT NOT NULL,
+      uploaded_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+  `);
+}
+
+// --- Migrations ------------------------------------------------------------
+async function runMigrations() {
+  // m001 — reference + operational tables
+  await migrate('m001_reference_and_ops_tables', async () => {
+    await exec(`
+      CREATE TABLE IF NOT EXISTS brands (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        status TEXT CHECK( status IN ('New', 'Open', 'Pending', 'Solved', 'Closed') ) DEFAULT 'New',
-        priority TEXT CHECK( priority IN ('Low', 'Medium', 'High', 'Urgent') ) DEFAULT 'Low',
-        customer_name TEXT NOT NULL,
-        customer_email TEXT NOT NULL,
-        assignee_name TEXT DEFAULT 'Unassigned',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Create comments table
-    db.run(`
-      CREATE TABLE IF NOT EXISTS comments (
+        code TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        active INTEGER DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS outlets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        brand_code TEXT NOT NULL,
+        display_label TEXT,
+        active INTEGER DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS departments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        department_code TEXT NOT NULL,
+        name TEXT NOT NULL,
+        active INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 0,
+        UNIQUE(department_code, name)
+      );
+      CREATE TABLE IF NOT EXISTS ticket_counters (
+        department_code TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (department_code, year)
+      );
+      CREATE TABLE IF NOT EXISTS ticket_assignments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ticket_id INTEGER NOT NULL,
-        author_name TEXT NOT NULL,
-        author_role TEXT CHECK( author_role IN ('Customer', 'Agent') ) NOT NULL,
-        message TEXT NOT NULL,
+        technician_id INTEGER,
+        assigned_by INTEGER,
+        reason TEXT,
+        active INTEGER DEFAULT 1,
+        assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        unassigned_at DATETIME,
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS ticket_activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER NOT NULL,
+        actor_user_id INTEGER,
+        actor_name TEXT,
+        actor_role TEXT,
+        action TEXT NOT NULL,
+        detail TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
-      )
-    `);
-
-    // Create attachments table with uploaded_by referencing users
-    db.run(`
-      CREATE TABLE IF NOT EXISTS attachments (
-        id TEXT PRIMARY KEY,
+      );
+      CREATE TABLE IF NOT EXISTS technician_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        day_of_week INTEGER NOT NULL,      -- 0=Sun .. 6=Sat
+        start_time TEXT NOT NULL,          -- 'HH:MM'
+        end_time TEXT NOT NULL,            -- 'HH:MM'
+        active INTEGER DEFAULT 1,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS technician_unavailability (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        start_datetime DATETIME NOT NULL,
+        end_datetime DATETIME NOT NULL,
+        reason TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS technician_skills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        department_code TEXT,
+        category_name TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS user_brand_access (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        brand_code TEXT NOT NULL,
+        UNIQUE(user_id, brand_code),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS user_outlet_access (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        outlet_code TEXT NOT NULL,
+        UNIQUE(user_id, outlet_code),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS notification_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         ticket_id INTEGER,
-        file_url TEXT NOT NULL,
-        file_name TEXT NOT NULL,
-        file_size INTEGER NOT NULL,
-        mime_type TEXT NOT NULL,
-        uploaded_by INTEGER,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
-        FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
-      )
+        channel TEXT NOT NULL,             -- in_app | email | whatsapp
+        recipient TEXT,
+        template TEXT,
+        payload TEXT,
+        status TEXT DEFAULT 'queued',      -- queued | sent | skipped | failed
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS sla_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enabled INTEGER DEFAULT 0,
+        department_code TEXT,
+        urgency TEXT,
+        category_name TEXT,
+        first_response_mins INTEGER,
+        resolution_mins INTEGER,
+        active INTEGER DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
     `);
-
-    // Check if we need to seed the tables
-    db.get('SELECT COUNT(*) AS count FROM users', (err, row) => {
-      if (err) {
-        console.error('Error checking users count:', err.message);
-        return;
-      }
-
-      if (row.count === 0) {
-        console.log('Seeding initial Zendesk-inspired demonstration data...');
-        seedData();
-      }
-    });
   });
-}
 
-function seedData() {
-  const defaultPasswordHash = bcrypt.hashSync('Password123!', 10);
-  
-  const seedUsers = [
-    { username: 'Agent Admin', email: 'agent@omnidesk.com', password_hash: defaultPasswordHash, role: 'Agent' },
-    { username: 'John Doe', email: 'john.doe@example.com', password_hash: defaultPasswordHash, role: 'Customer' },
-    { username: 'Alice Smith', email: 'alice.smith@techcorp.io', password_hash: defaultPasswordHash, role: 'Customer' },
-    { username: 'Michael Scott', email: 'michael.scott@dundermifflin.com', password_hash: defaultPasswordHash, role: 'Customer' },
-    { username: 'Pam Beesly', email: 'pam@dundermifflin.com', password_hash: defaultPasswordHash, role: 'Customer' }
-  ];
-
-  const userStmt = db.prepare(`
-    INSERT INTO users (username, email, password_hash, role)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  seedUsers.forEach(u => {
-    userStmt.run(u.username, u.email, u.password_hash, u.role, (err) => {
-      if (err) console.error('Error seeding user:', err.message);
-    });
-  });
-  userStmt.finalize();
-
-  const initialTickets = [
-    {
-      title: 'Unable to access dashboard after password reset',
-      description: 'Hi support, I reset my password today but when I try to log in, the dashboard page keeps showing a 403 Forbidden error. I already cleared my browser cache but the issue persists. Please help!',
-      status: 'Open',
-      priority: 'High',
-      customer_name: 'John Doe',
-      customer_email: 'john.doe@example.com',
-      assignee_name: 'Sarah Connor (Agent)'
-    },
-    {
-      title: 'Inquiry regarding API limits for Enterprise plan',
-      description: 'Hello, our company is building an integration and we need to know the exact rate limits for the Enterprise REST APIs. Also, do you support webhook retry policies?',
-      status: 'Pending',
-      priority: 'Medium',
-      customer_name: 'Alice Smith',
-      customer_email: 'alice.smith@techcorp.io',
-      assignee_name: 'Dave Miller (API Support)'
-    },
-    {
-      title: 'URGENT: Production database connection failing intermittently',
-      description: 'We are seeing frequent database connection timeouts in our production environment. This is affecting our end users. Need immediate assistance from the infrastructure team.',
-      status: 'New',
-      priority: 'Urgent',
-      customer_name: 'Michael Scott',
-      customer_email: 'michael.scott@dundermifflin.com',
-      assignee_name: 'Unassigned'
-    },
-    {
-      title: 'Typo in invoicing PDF footer',
-      description: 'There is a small typo in the address listed in the footer of our PDF invoices. It says "123 Main Stree" instead of "Street". Please correct this on the next billing cycle.',
-      status: 'Solved',
-      priority: 'Low',
-      customer_name: 'Pam Beesly',
-      customer_email: 'pam@dundermifflin.com',
-      assignee_name: 'Emily Watson (Billing)'
+  // m002 — expand users (relax role CHECK, add operational columns)
+  await migrate('m002_expand_users', async () => {
+    await run('PRAGMA foreign_keys = OFF');
+    await exec('BEGIN TRANSACTION');
+    try {
+      await exec(`
+        CREATE TABLE users_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE NOT NULL,
+          email TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'Requestor',
+          department TEXT,
+          brand TEXT,
+          all_brands INTEGER DEFAULT 0,
+          phone TEXT,
+          is_active INTEGER DEFAULT 1,
+          can_close_override INTEGER DEFAULT 0,
+          default_outlet_code TEXT,
+          failed_attempts INTEGER DEFAULT 0,
+          locked_until DATETIME DEFAULT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO users_new
+          (id, username, email, password_hash, role, department, brand, all_brands,
+           is_active, failed_attempts, locked_until, created_at)
+        SELECT
+          id, username, email, password_hash,
+          CASE role WHEN 'Agent' THEN 'SuperAdmin' WHEN 'Customer' THEN 'Requestor' ELSE 'Requestor' END,
+          NULL,
+          brand,
+          CASE role WHEN 'Agent' THEN 1 ELSE 0 END,
+          1,
+          COALESCE(failed_attempts, 0),
+          locked_until,
+          created_at
+        FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+      `);
+      await exec('COMMIT');
+    } catch (e) {
+      await exec('ROLLBACK');
+      throw e;
+    } finally {
+      await run('PRAGMA foreign_keys = ON');
     }
-  ];
-
-  const stmt = db.prepare(`
-    INSERT INTO tickets (title, description, status, priority, customer_name, customer_email, assignee_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  initialTickets.forEach((t) => {
-    stmt.run(t.title, t.description, t.status, t.priority, t.customer_name, t.customer_email, t.assignee_name, function(err) {
-      if (err) {
-        console.error('Error seeding ticket:', err.message);
-        return;
-      }
-      
-      const ticketId = this.lastID;
-      // Add initial comment for the tickets
-      if (ticketId === 1) {
-        db.run(`
-          INSERT INTO comments (ticket_id, author_name, author_role, message)
-          VALUES 
-            (?, ?, 'Customer', 'Can someone please look into this? I have an urgent report to complete.'),
-            (?, ?, 'Agent', 'Hi John, I am looking into this now. It seems like a permissions caching issue on your user profile. I am refreshing it now. Please try again in 5 minutes.')
-        `, ticketId, 'John Doe', ticketId, 'Sarah Connor (Agent)');
-      } else if (ticketId === 2) {
-        db.run(`
-          INSERT INTO comments (ticket_id, author_name, author_role, message)
-          VALUES 
-            (?, ?, 'Agent', 'Hi Alice, the rate limit is 10,000 requests per minute. For webhooks, we retry 5 times with exponential backoff. Let me double check if we can raise this limit for you.')
-        `, ticketId, 'Dave Miller (API Support)');
-      } else if (ticketId === 4) {
-        db.run(`
-          INSERT INTO comments (ticket_id, author_name, author_role, message)
-          VALUES 
-            (?, ?, 'Agent', 'Hi Pam, I have updated the template. The typo is fixed, and your future invoices will display "Street". Marking this ticket as solved!')
-        `, ticketId, 'Emily Watson (Billing)');
-      }
-    });
   });
 
-  stmt.finalize();
+  // m003 — expand tickets (operational columns + SLA timestamps)
+  await migrate('m003_expand_tickets', async () => {
+    await addColumn('tickets', 'ticket_number', 'TEXT');
+    await addColumn('tickets', 'department', 'TEXT');
+    await addColumn('tickets', 'category', 'TEXT');
+    await addColumn('tickets', 'outlet_code', 'TEXT');
+    await addColumn('tickets', 'brand_code', 'TEXT');
+    await addColumn('tickets', 'urgency', "TEXT DEFAULT 'Medium'");
+    await addColumn('tickets', 'report_mode', "TEXT DEFAULT 'quick'");
+    await addColumn('tickets', 'requestor_user_id', 'INTEGER');
+    await addColumn('tickets', 'contact_person', 'TEXT');
+    await addColumn('tickets', 'contact_number', 'TEXT');
+    await addColumn('tickets', 'location_detail', 'TEXT');
+    await addColumn('tickets', 'device_equipment', 'TEXT');
+    await addColumn('tickets', 'business_impact', 'TEXT');
+    await addColumn('tickets', 'preferred_visit_time', 'TEXT');
+    await addColumn('tickets', 'occurrence_at', 'DATETIME');
+    await addColumn('tickets', 'assigned_technician_id', 'INTEGER');
+    await addColumn('tickets', 'resolution_note', 'TEXT');
+    await addColumn('tickets', 'cancel_reason', 'TEXT');
+    await addColumn('tickets', 'estimated_cost', 'REAL');
+    await addColumn('tickets', 'sparepart_note', 'TEXT');
+    await addColumn('tickets', 'expected_part_date', 'DATETIME');
+    await addColumn('tickets', 'vendor_note', 'TEXT');
+    await addColumn('tickets', 'first_response_at', 'DATETIME');
+    await addColumn('tickets', 'assigned_at', 'DATETIME');
+    await addColumn('tickets', 'started_at', 'DATETIME');
+    await addColumn('tickets', 'resolved_at', 'DATETIME');
+    await addColumn('tickets', 'closed_at', 'DATETIME');
+    // unique index on ticket_number (allows multiple NULLs in SQLite)
+    await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_number ON tickets(ticket_number)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_department ON tickets(department)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_brand ON tickets(brand_code)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)');
+  });
+
+  // m004 — attachments can attach to comments + before/after phase
+  await migrate('m004_attachments_comment_phase', async () => {
+    await addColumn('attachments', 'comment_id', 'INTEGER');
+    await addColumn('attachments', 'phase', "TEXT DEFAULT 'general'"); // general|before|after
+  });
+
+  // m005 — comments: separate system logs from human comments
+  await migrate('m005_comments_is_system', async () => {
+    await addColumn('comments', 'is_system', 'INTEGER DEFAULT 0');
+    await addColumn('comments', 'author_user_id', 'INTEGER');
+  });
+
+  // m006 — seed reference data (idempotent)
+  await migrate('m006_seed_reference', async () => {
+    for (const b of BRANDS) {
+      await run('INSERT OR IGNORE INTO brands (code, name) VALUES (?, ?)', [b.code, b.name]);
+    }
+    for (const o of OUTLETS) {
+      const [code, brand, display] = o;
+      await run(
+        'INSERT OR IGNORE INTO outlets (code, name, brand_code, display_label) VALUES (?, ?, ?, ?)',
+        [code, code, brand, display || code]
+      );
+    }
+    for (const d of DEPARTMENTS) {
+      await run('INSERT OR IGNORE INTO departments (code, name) VALUES (?, ?)', [d.code, d.name]);
+    }
+    for (const [dept, list] of Object.entries(CATEGORIES)) {
+      let order = 0;
+      for (const name of list) {
+        await run(
+          'INSERT OR IGNORE INTO categories (department_code, name, sort_order) VALUES (?, ?, ?)',
+          [dept, name, order++]
+        );
+      }
+    }
+    // Default (disabled) SLA row so the settings module has something to show.
+    await run(
+      'INSERT INTO sla_settings (enabled, department_code, urgency, first_response_mins, resolution_mins) VALUES (0, NULL, NULL, 60, 480)'
+    );
+  });
+
+  // m008 — relax the legacy CHECK constraints on tickets.status / tickets.priority
+  await migrate('m008_relax_ticket_constraints', async () => {
+    await run('PRAGMA foreign_keys = OFF');
+    await exec('BEGIN TRANSACTION');
+    try {
+      await exec(`
+        CREATE TABLE tickets_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ticket_number TEXT,
+          title TEXT NOT NULL,
+          description TEXT,
+          status TEXT DEFAULT 'New',
+          priority TEXT,
+          urgency TEXT DEFAULT 'Medium',
+          department TEXT,
+          category TEXT,
+          outlet_code TEXT,
+          brand_code TEXT,
+          report_mode TEXT DEFAULT 'quick',
+          requestor_user_id INTEGER,
+          customer_name TEXT,
+          customer_email TEXT,
+          contact_person TEXT,
+          contact_number TEXT,
+          location_detail TEXT,
+          device_equipment TEXT,
+          business_impact TEXT,
+          preferred_visit_time TEXT,
+          occurrence_at DATETIME,
+          assignee_name TEXT DEFAULT 'Unassigned',
+          assigned_technician_id INTEGER,
+          resolution_note TEXT,
+          cancel_reason TEXT,
+          estimated_cost REAL,
+          sparepart_note TEXT,
+          expected_part_date DATETIME,
+          vendor_note TEXT,
+          first_response_at DATETIME,
+          assigned_at DATETIME,
+          started_at DATETIME,
+          resolved_at DATETIME,
+          closed_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO tickets_new
+          (id, ticket_number, title, description, status, priority, urgency, department, category,
+           outlet_code, brand_code, report_mode, requestor_user_id, customer_name, customer_email,
+           contact_person, contact_number, location_detail, device_equipment, business_impact,
+           preferred_visit_time, occurrence_at, assignee_name, assigned_technician_id, resolution_note,
+           cancel_reason, estimated_cost, sparepart_note, expected_part_date, vendor_note,
+           first_response_at, assigned_at, started_at, resolved_at, closed_at, created_at, updated_at)
+        SELECT
+           id, ticket_number, title, description, status, priority, urgency, department, category,
+           outlet_code, brand_code, report_mode, requestor_user_id, customer_name, customer_email,
+           contact_person, contact_number, location_detail, device_equipment, business_impact,
+           preferred_visit_time, occurrence_at, assignee_name, assigned_technician_id, resolution_note,
+           cancel_reason, estimated_cost, sparepart_note, expected_part_date, vendor_note,
+           first_response_at, assigned_at, started_at, resolved_at, closed_at, created_at, updated_at
+        FROM tickets;
+        DROP TABLE tickets;
+        ALTER TABLE tickets_new RENAME TO tickets;
+      `);
+      await exec('COMMIT');
+    } catch (e) { await exec('ROLLBACK'); throw e; }
+    finally { await run('PRAGMA foreign_keys = ON'); }
+    await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_number ON tickets(ticket_number)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_department ON tickets(department)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_brand ON tickets(brand_code)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)');
+  });
+
+  // m009 — relax the legacy CHECK constraint on comments.author_role
+  await migrate('m009_relax_comment_constraints', async () => {
+    await run('PRAGMA foreign_keys = OFF');
+    await exec('BEGIN TRANSACTION');
+    try {
+      await exec(`
+        CREATE TABLE comments_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ticket_id INTEGER NOT NULL,
+          author_name TEXT NOT NULL,
+          author_role TEXT,
+          author_user_id INTEGER,
+          message TEXT NOT NULL,
+          is_system INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+        );
+        INSERT INTO comments_new (id, ticket_id, author_name, author_role, author_user_id, message, is_system, created_at)
+        SELECT id, ticket_id, author_name, author_role, author_user_id, message, COALESCE(is_system,0), created_at FROM comments;
+        DROP TABLE comments;
+        ALTER TABLE comments_new RENAME TO comments;
+      `);
+      await exec('COMMIT');
+    } catch (e) { await exec('ROLLBACK'); throw e; }
+    finally { await run('PRAGMA foreign_keys = ON'); }
+  });
+
+  // m007 — backfill legacy tickets into the new model + ticket numbers
+  await migrate('m007_backfill_tickets', async () => {
+    const legacy = await all(
+      'SELECT id, priority, created_at FROM tickets WHERE ticket_number IS NULL ORDER BY id ASC'
+    );
+    for (const t of legacy) {
+      const year = new Date(t.created_at || Date.now()).getFullYear();
+      // atomic-ish counter bump (single-threaded migration)
+      await run(
+        `INSERT INTO ticket_counters (department_code, year, last_seq) VALUES ('IT', ?, 1)
+         ON CONFLICT(department_code, year) DO UPDATE SET last_seq = last_seq + 1`,
+        [year]
+      );
+      const row = await get(
+        'SELECT last_seq FROM ticket_counters WHERE department_code = ? AND year = ?',
+        ['IT', year]
+      );
+      const number = `IT-${year}-${String(row.last_seq).padStart(4, '0')}`;
+      const urgency =
+        t.priority === 'Urgent' ? 'Critical'
+          : t.priority === 'High' ? 'High'
+          : t.priority === 'Medium' ? 'Medium'
+          : 'Low';
+      await run(
+        `UPDATE tickets
+           SET ticket_number = ?, department = 'IT', category = 'Other IT',
+               urgency = ?, report_mode = 'detailed'
+         WHERE id = ?`,
+        [number, urgency, t.id]
+      );
+    }
+  });
 }
+
+// --- Demo seed (fresh installs only) --------------------------------------
+async function seedIfEmpty() {
+  const row = await get('SELECT COUNT(*) AS count FROM users');
+  if (row.count > 0) return;
+  console.log('Seeding IT-ME demo data (fresh install)...');
+
+  const pw = bcrypt.hashSync('Password123!', 10);
+  const users = [
+    // username, email, role, department, all_brands, brand
+    ['Super Admin', 'superadmin@union.com', 'SuperAdmin', null, 1, null],
+    ['Admin IT', 'adminit@union.com', 'AdminIT', 'IT', 1, null],
+    ['Admin ME', 'adminme@union.com', 'AdminME', 'ME', 1, null],
+    ['Budi (IT Tech)', 'techit1@union.com', 'TechnicianIT', 'IT', 1, null],
+    ['Andi (IT Tech)', 'techit2@union.com', 'TechnicianIT', 'IT', 1, null],
+    ['Slamet (ME Tech)', 'techme1@union.com', 'TechnicianME', 'ME', 1, null],
+    ['Joko (ME Tech)', 'techme2@union.com', 'TechnicianME', 'ME', 1, null],
+    ['Operations Leader', 'leader@union.com', 'Leader', null, 1, null],
+    ['UTP Outlet', 'requestor@union.com', 'Requestor', null, 0, 'UNION'],
+  ];
+  const ids = {};
+  for (const [username, email, role, dept, allBrands, brand] of users) {
+    const r = await run(
+      `INSERT INTO users (username, email, password_hash, role, department, all_brands, brand, default_outlet_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [username, email, pw, role, dept, allBrands, brand, email.startsWith('requestor') ? 'UTP' : null]
+    );
+    ids[email] = r.lastID;
+  }
+
+  // Requestor scoped to UNION brand + UTP outlet
+  await run('INSERT OR IGNORE INTO user_brand_access (user_id, brand_code) VALUES (?, ?)', [ids['requestor@union.com'], 'UNION']);
+  await run('INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)', [ids['requestor@union.com'], 'UTP']);
+
+  // Technician Mon–Fri 09:00–18:00 schedules
+  for (const email of ['techit1@union.com', 'techit2@union.com', 'techme1@union.com', 'techme2@union.com']) {
+    for (let d = 1; d <= 5; d++) {
+      await run(
+        'INSERT INTO technician_schedules (user_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)',
+        [ids[email], d, '09:00', '18:00']
+      );
+    }
+  }
+  // A couple of skills
+  await run('INSERT INTO technician_skills (user_id, department_code, category_name) VALUES (?, ?, ?)', [ids['techit1@union.com'], 'IT', 'POS System']);
+  await run('INSERT INTO technician_skills (user_id, department_code, category_name) VALUES (?, ?, ?)', [ids['techme1@union.com'], 'ME', 'AC']);
+}
+
+// --- Init orchestration ----------------------------------------------------
+async function initDatabase() {
+  await run('PRAGMA foreign_keys = ON');
+  await createBaseTables();
+  await runMigrations();
+  await seedIfEmpty();
+  console.log('Database ready:', dbPath);
+}
+
+const ready = initDatabase().catch((err) => {
+  console.error('FATAL: database initialization failed:', err);
+  process.exit(1);
+});
+
+db.ready = ready; // app.js can await db.ready before listening
+db.APP_ROLES = APP_ROLES;
 
 module.exports = db;

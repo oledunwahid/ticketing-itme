@@ -1,2508 +1,1157 @@
 /* ==========================================================================
-   OmniDesk - Frontend Logic Script
+   IT-ME Ticketing — Frontend SPA (vanilla JS, role-aware, responsive)
    ========================================================================== */
+'use strict';
 
-// --- Global Application State ---
+// ---- Domain constants (mirror backend) ----
+const STATUSES = ['New', 'Open', 'Assigned', 'On Progress', 'Waiting Sparepart',
+  'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'];
+const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
+const TECH_STATUSES = ['On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
+const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
+const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
+
+const NAV = {
+  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users'],
+  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports'],
+  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports'],
+  TechnicianIT: ['tickets'],
+  TechnicianME: ['tickets'],
+  Requestor: ['tickets'],
+  Leader: ['dashboard', 'tickets', 'reports'],
+};
+const NAV_META = {
+  dashboard: { label: 'Dashboard', icon: 'grid' },
+  tickets: { label: 'Tickets', icon: 'ticket' },
+  queue: { label: 'Queue', icon: 'inbox' },
+  schedules: { label: 'Schedules', icon: 'calendar' },
+  reports: { label: 'Reports', icon: 'chart' },
+  users: { label: 'Users', icon: 'users' },
+};
+const ICONS = {
+  grid: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+  ticket: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+  inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
+};
+
+// ---- State ----
 const state = {
-  isAuthenticated: false,
   user: null,
-  activeSection: 'section-dashboard',
-  tickets: [],
-  selectedTicketId: null,
-  filters: {
-    status: '',
-    priority: '',
-    search: ''
-  },
-  stats: {
-    total: 0,
-    new: 0,
-    open: 0,
-    pending: 0,
-    solved: 0,
-    closed: 0,
-    urgent: 0
-  }
+  route: { name: 'dashboard', id: null },
+  meta: { outlets: null, brandsByCode: {} },
 };
 
-// --- DOM Elements ---
-const elements = {
-  // Navigation
-  navDashboard: document.getElementById('btn-nav-dashboard'),
-  navTickets: document.getElementById('btn-nav-tickets'),
-  navCreate: document.getElementById('btn-nav-create'),
-  navItems: document.querySelectorAll('.nav-item'),
-  sections: document.querySelectorAll('.content-section'),
-  
-  // Header controls
-  globalSearch: document.getElementById('global-search'),
-  btnRefresh: document.getElementById('btn-refresh'),
-  btnNewTicketModal: document.getElementById('btn-new-ticket-modal'),
-  
-  // Dashboard metrics
-  statTotal: document.getElementById('stat-total-val'),
-  statOpen: document.getElementById('stat-open-val'),
-  statPending: document.getElementById('stat-pending-val'),
-  statUrgent: document.getElementById('stat-urgent-val'),
-  distNew: document.getElementById('dist-new'),
-  distOpen: document.getElementById('dist-open'),
-  distPending: document.getElementById('dist-pending'),
-  distSolved: document.getElementById('dist-solved'),
-  distClosed: document.getElementById('dist-closed'),
-  urgentMiniList: document.getElementById('urgent-mini-list'),
-  btnViewAllTickets: document.querySelector('.btn-view-all-tickets'),
-  
-  // Tickets View
-  filterStatus: document.getElementById('filter-status'),
-  filterPriority: document.getElementById('filter-priority'),
-  btnClearFilters: document.getElementById('btn-clear-filters'),
-  ticketsTableBody: document.getElementById('tickets-table-body'),
-  ticketsEmptyState: document.getElementById('tickets-empty-state'),
-  searchIndicator: document.getElementById('search-indicator'),
-  searchTerm: document.getElementById('search-term'),
-  
-  // Details Pane
-  detailPanel: document.getElementById('ticket-detail-panel'),
-  detailEmptyState: document.getElementById('detail-empty-state'),
-  detailContent: document.getElementById('detail-content'),
-  
-  // Create Modal
-  modalOverlay: document.getElementById('create-ticket-modal'),
-  btnCloseModal: document.getElementById('btn-close-modal'),
-  btnCancelModal: document.getElementById('btn-cancel-modal'),
-  createFormModal: document.getElementById('create-ticket-form-modal'),
-  
-  // Create Inline
-  createFormInline: document.getElementById('create-ticket-form-inline'),
-  btnCancelCreate: document.querySelector('.btn-cancel-create'),
-  
-  // Toast container
-  toastContainer: document.getElementById('toast-container'),
+// ---- DOM shortcuts ----
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const view = () => $('#app-view');
 
-  // Theme Toggle
-  themeToggle: document.getElementById('theme-toggle'),
+// ---- Helpers ----
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function stCls(s) { return 'st-' + String(s || '').replace(/\s+/g, ''); }
+function badge(status) { return `<span class="badge ${stCls(status)}">${esc(status)}</span>`; }
+function urgBadge(u) { return `<span class="badge ur-${esc(u)}">${esc(u)}</span>`; }
+function deptTag(d) { return `<span class="dept-tag dept-${esc(d)}">${esc(d)}</span>`; }
+function fmtDate(s) {
+  if (!s) return '—';
+  const d = new Date(s.includes('T') || s.includes('Z') ? s : s.replace(' ', 'T') + 'Z');
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function timeAgo(s) {
+  if (!s) return '';
+  const d = new Date(s.includes('T') || s.includes('Z') ? s : s.replace(' ', 'T') + 'Z');
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h ago`;
+  const days = Math.floor(h / 24);
+  return `${days}d ago`;
+}
+function agingClass(t) {
+  if (['Closed', 'Cancelled', 'Resolved'].includes(t.status)) return '';
+  const d = new Date((t.created_at || '').replace(' ', 'T') + 'Z');
+  return (Date.now() - d.getTime()) > 24 * 3600 * 1000 ? 'hot' : '';
+}
+function fmtBytes(b) { if (!b) return '0 B'; const k = 1024, s = ['B', 'KB', 'MB', 'GB']; const i = Math.floor(Math.log(b) / Math.log(k)); return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i]; }
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+function svg(paths, size = 20) { return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`; }
 
-  // User Management
-  navUsers: document.getElementById('btn-nav-users'),
-  usersTableBody: document.getElementById('users-table-body'),
-  usersEmptyState: document.getElementById('users-empty-state'),
-  btnCreateUser: document.getElementById('btn-add-user'),
-  userModal: document.getElementById('user-modal'),
-  btnCloseUserModal: document.getElementById('btn-close-user-modal'),
-  btnCancelUserModal: document.getElementById('btn-cancel-user-modal'),
-  formUser: document.getElementById('form-user'),
-  userModalTitle: document.getElementById('user-modal-title'),
-  userIdField: document.getElementById('user-id-field'),
-  userUsernameField: document.getElementById('user-username-field'),
-  userEmailField: document.getElementById('user-email-field'),
-  userPasswordField: document.getElementById('user-password-field'),
-  userPasswordGroup: document.getElementById('user-password-group'),
-  userRoleField: document.getElementById('user-role-field'),
-  userBrandField: document.getElementById('user-brand-field'),
-  userPasswordComplexity: document.getElementById('user-password-complexity'),
-
-  // Reports View
-  navReports: document.getElementById('btn-nav-reports'),
-  reportStatus: document.getElementById('report-status'),
-  reportStartDate: document.getElementById('report-start-date'),
-  reportEndDate: document.getElementById('report-end-date'),
-  reportCustomer: document.getElementById('report-customer'),
-  reportAgent: document.getElementById('report-agent'),
-  btnGenerateReport: document.getElementById('btn-generate-report'),
-  btnResetReportFilters: document.getElementById('btn-reset-report-filters'),
-  reportResultsContainer: document.getElementById('report-results-container'),
-  reportTableBody: document.getElementById('report-table-body'),
-  reportEmptyState: document.getElementById('report-empty-state'),
-  btnExportPDF: document.getElementById('btn-export-pdf'),
-  btnExportExcel: document.getElementById('btn-export-excel')
-};
-
-// Global attachment uploader instances
-let inlineUploader;
-let modalUploader;
-
-// --- Theme Manager Utility ---
-function updateThemeIcon(isLight) {
-  const sunIcon = document.querySelector('.theme-icon-sun');
-  const moonIcon = document.querySelector('.theme-icon-moon');
-  if (sunIcon && moonIcon) {
-    if (isLight) {
-      sunIcon.style.display = 'none';
-      moonIcon.style.display = 'block';
-    } else {
-      sunIcon.style.display = 'block';
-      moonIcon.style.display = 'none';
-    }
-  }
+// Password field with a show/hide eye toggle. Toggles are wired globally via delegation.
+const EYE_ICON = '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>';
+const EYE_OFF_ICON = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
+function pwInput(id, attrs = '') {
+  return `<div class="pw-wrap"><input type="password" id="${id}" ${attrs}><button type="button" class="pw-toggle" aria-label="Show password" tabindex="-1">${svg(EYE_ICON, 18)}</button></div>`;
 }
 
-// --- Initialization ---
-document.addEventListener('DOMContentLoaded', async () => {
-  // Initialize Theme preference
-  const savedTheme = localStorage.getItem('theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  if (savedTheme === 'light' || (!savedTheme && !prefersDark)) {
-    document.body.classList.add('light-theme');
-    updateThemeIcon(true);
-  } else {
-    updateThemeIcon(false);
+// ---- Toast ----
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="dot"></span><span>${esc(msg)}</span>`;
+  $('#toast-container').appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3600);
+}
+
+// ---- API layer ----
+class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+let reauthInFlight = null;
+
+async function rawFetch(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (opts.body && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const res = await fetch(url, { credentials: 'include', ...opts, headers });
+  if (res.status === 401 && !url.includes('/api/auth/')) {
+    if (state.user) {
+      const ok = await openReauth();
+      if (ok) return fetch(url, { credentials: 'include', ...opts, headers });
+      throw new ApiError('Session expired', 401);
+    }
+    state.user = null; renderAuth('login');
+    throw new ApiError('Unauthorized', 401);
   }
-
-  // Initialize uploaders
-  inlineUploader = new AttachmentUploader('inline-upload-zone', 'inline-file-input', 'inline-preview-list');
-  modalUploader = new AttachmentUploader('modal-upload-zone', 'modal-file-input', 'modal-preview-list');
-
-  setupEventListeners();
-
-  // Verify authentication first, then route
-  await checkAuth();
-  handleRouting();
-});
-
-// --- API Helper Functions ---
+  return res;
+}
+async function apiJSON(url, opts) {
+  const res = await rawFetch(url, opts);
+  let data = null; try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new ApiError((data && data.error) || 'Request failed', res.status);
+  return data;
+}
 const api = {
-  baseUrl: '/api',
-
-  async request(url, options = {}) {
-    let res = await fetch(url, { credentials: 'include', ...options });
-    
-    // Intercept 401 Unauthorized
-    if (res.status === 401) {
-      if (url.includes('/api/auth/login') || url.includes('/api/auth/register') || url.includes('/api/auth/me')) {
-        return res;
-      }
-
-      if (state.isAuthenticated) {
-        // Trigger mid-session expiry reauth modal
-        const success = await openReauthModal();
-        if (success) {
-          // Retry original request with credentials
-          res = await fetch(url, { credentials: 'include', ...options });
-        } else {
-          throw new Error('Re-authentication cancelled');
-        }
-      } else {
-        // Redirect to login
-        navigateTo(`/login?redirect=${encodeURIComponent(window.location.pathname)}`);
-        throw new Error('Unauthorized');
-      }
-    }
-    
-    return res;
-  },
-
-  async getStats() {
-    const res = await this.request(`${this.baseUrl}/stats`);
-    if (!res.ok) throw new Error('Failed to fetch stats');
-    return res.json();
-  },
-
-  async getTickets(filters = {}) {
-    const query = new URLSearchParams();
-    if (filters.status) query.append('status', filters.status);
-    if (filters.priority) query.append('priority', filters.priority);
-    if (filters.search) query.append('search', filters.search);
-    
-    const res = await this.request(`${this.baseUrl}/tickets?${query.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch tickets');
-    return res.json();
-  },
-
-  async getTicketDetails(id) {
-    const res = await this.request(`${this.baseUrl}/tickets/${id}`);
-    if (!res.ok) throw new Error(`Failed to fetch ticket details for ID ${id}`);
-    return res.json();
-  },
-
-  async createTicket(ticketData) {
-    const res = await this.request(`${this.baseUrl}/tickets`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ticketData)
-    });
-    if (!res.ok) throw new Error('Failed to create ticket');
-    return res.json();
-  },
-
-  async updateTicket(id, updateData) {
-    const res = await this.request(`${this.baseUrl}/tickets/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updateData)
-    });
-    if (!res.ok) throw new Error('Failed to update ticket');
-    return res.json();
-  },
-
-  async addComment(id, commentData) {
-    const res = await this.request(`${this.baseUrl}/tickets/${id}/comments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(commentData)
-    });
-    if (!res.ok) throw new Error('Failed to add comment');
-    return res.json();
-  },
-
-  async getUsers() {
-    const res = await this.request(`${this.baseUrl}/users`);
-    if (!res.ok) throw new Error('Failed to fetch users');
-    return res.json();
-  },
-
-  async createUser(userData) {
-    const res = await this.request(`${this.baseUrl}/users`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userData)
-    });
-    if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.error || 'Failed to create user');
-    }
-    return res.json();
-  },
-
-  async updateUser(id, userData) {
-    const res = await this.request(`${this.baseUrl}/users/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userData)
-    });
-    if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.error || 'Failed to update user');
-    }
-    return res.json();
-  },
-
-  async deleteUser(id) {
-    const res = await this.request(`${this.baseUrl}/users/${id}`, {
-      method: 'DELETE'
-    });
-    if (!res.ok) {
-      let errMsg = 'Failed to delete user';
-      try { const d = await res.json(); errMsg = d.error || errMsg; } catch(_) {}
-      throw new Error(errMsg);
-    }
-    return true;
-  }
+  me: () => apiJSON('/api/auth/me'),
+  login: (email, password) => apiJSON('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  register: (b) => apiJSON('/api/auth/register', { method: 'POST', body: JSON.stringify(b) }),
+  logout: () => rawFetch('/api/auth/logout', { method: 'POST' }),
+  outlets: () => apiJSON('/api/meta/outlets'),
+  brands: () => apiJSON('/api/meta/brands'),
+  categories: (dept) => apiJSON('/api/meta/categories?department=' + encodeURIComponent(dept)),
+  tickets: (qs = '') => apiJSON('/api/tickets' + (qs ? '?' + qs : '')),
+  ticket: (id) => apiJSON('/api/tickets/' + id),
+  createTicket: (b) => apiJSON('/api/tickets', { method: 'POST', body: JSON.stringify(b) }),
+  patchTicket: (id, b) => apiJSON('/api/tickets/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
+  recommend: (id) => apiJSON('/api/tickets/' + id + '/recommend'),
+  assign: (id, b) => apiJSON('/api/tickets/' + id + '/assign', { method: 'POST', body: JSON.stringify(b) }),
+  comment: (id, b) => apiJSON('/api/tickets/' + id + '/comments', { method: 'POST', body: JSON.stringify(b) }),
+  technicians: (dept) => apiJSON('/api/technicians' + (dept ? '?department=' + dept : '')),
+  schedules: (id) => apiJSON('/api/technicians/' + id + '/schedules'),
+  addSchedule: (id, b) => apiJSON('/api/technicians/' + id + '/schedules', { method: 'POST', body: JSON.stringify(b) }),
+  delSchedule: (id, sid) => apiJSON('/api/technicians/' + id + '/schedules/' + sid, { method: 'DELETE' }),
+  addUnavail: (id, b) => apiJSON('/api/technicians/' + id + '/unavailability', { method: 'POST', body: JSON.stringify(b) }),
+  dashboard: () => apiJSON('/api/dashboard'),
+  report: (qs) => apiJSON('/api/reports/tickets' + (qs ? '?' + qs : '')),
+  users: () => apiJSON('/api/users'),
+  createUser: (b) => apiJSON('/api/users', { method: 'POST', body: JSON.stringify(b) }),
+  patchUser: (id, b) => apiJSON('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
+  delUser: (id) => apiJSON('/api/users/' + id, { method: 'DELETE' }),
 };
 
-// --- Event Listeners Setup ---
-function setupEventListeners() {
-  // Sidebar Navigation Click
-  elements.navItems.forEach(item => {
-    item.addEventListener('click', () => {
-      const target = item.getAttribute('data-target');
-      switchView(target);
-    });
-  });
+async function loadOutlets() {
+  if (state.meta.outlets) return state.meta.outlets;
+  state.meta.outlets = await api.outlets();
+  return state.meta.outlets;
+}
 
-  // Top Bar Refresh Button
-  elements.btnRefresh.addEventListener('click', () => {
-    loadAllData();
-    showToast('Dashboard data refreshed', 'info');
-  });
-
-  // Modal Open/Close triggers
-  elements.btnNewTicketModal.addEventListener('click', () => {
-    elements.modalOverlay.classList.add('active');
-  });
-
-  const closeModalFunc = () => {
-    elements.modalOverlay.classList.remove('active');
-    elements.createFormModal.reset();
-    if (modalUploader) modalUploader.clearAll();
+// ==========================================================================
+// Modal system
+// ==========================================================================
+function openModal({ title, bodyHTML, footHTML, onMount, size }) {
+  const root = $('#modal-root');
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="${size === 'lg' ? 'max-width:720px' : ''}" role="dialog" aria-modal="true">
+      <div class="modal-head"><h3>${esc(title)}</h3><button class="modal-close" aria-label="Close">&times;</button></div>
+      <div class="modal-body">${bodyHTML}</div>
+      ${footHTML ? `<div class="modal-foot">${footHTML}</div>` : ''}
+    </div>`;
+  root.appendChild(overlay);
+  const prevFocus = document.activeElement;
+  const onKey = (e) => {
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Tab') trapFocus(e, overlay);
   };
-
-  elements.btnCloseModal.addEventListener('click', closeModalFunc);
-  elements.btnCancelModal.addEventListener('click', closeModalFunc);
-
-  // Modal Submit Form
-  elements.createFormModal.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (modalUploader && modalUploader.isUploading()) {
-      showToast('Please wait for all attachments to finish uploading.', 'error');
-      return;
-    }
-
-    const submitBtn = elements.createFormModal.querySelector('button[type="submit"]');
-    submitBtn.disabled = true;
-    submitBtn.innerText = 'Creating...';
-
-    const ticketData = {
-      customer_name: document.getElementById('modal-customer-name').value,
-      customer_email: document.getElementById('modal-customer-email').value,
-      title: document.getElementById('modal-ticket-title').value,
-      priority: document.getElementById('modal-ticket-priority').value,
-      description: document.getElementById('modal-ticket-description').value,
-      attachmentIds: modalUploader ? modalUploader.getUploadedIds() : []
-    };
-
-    try {
-      await api.createTicket(ticketData);
-      showToast('Support ticket logged successfully', 'success');
-      if (modalUploader) modalUploader.attachments = []; // clear tracking (files are saved)
-      closeModalFunc();
-      loadAllData();
-      switchView('section-tickets');
-    } catch (err) {
-      console.error(err);
-      showToast('Error creating ticket. Please check input fields.', 'error');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.innerText = 'Create Ticket';
-    }
-  });
-
-  // Inline Form Cancel/Submit
-  elements.btnCancelCreate.addEventListener('click', () => {
-    elements.createFormInline.reset();
-    if (inlineUploader) inlineUploader.clearAll();
-    switchView('section-dashboard');
-  });
-
-  elements.createFormInline.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (inlineUploader && inlineUploader.isUploading()) {
-      showToast('Please wait for all attachments to finish uploading.', 'error');
-      return;
-    }
-
-    const submitBtn = elements.createFormInline.querySelector('button[type="submit"]');
-    submitBtn.disabled = true;
-    submitBtn.innerText = 'Creating...';
-
-    const ticketData = {
-      customer_name: document.getElementById('inline-customer-name').value,
-      customer_email: document.getElementById('inline-customer-email').value,
-      title: document.getElementById('inline-ticket-title').value,
-      priority: document.getElementById('inline-ticket-priority').value,
-      description: document.getElementById('inline-ticket-description').value,
-      attachmentIds: inlineUploader ? inlineUploader.getUploadedIds() : []
-    };
-
-    try {
-      await api.createTicket(ticketData);
-      showToast('Support ticket logged successfully', 'success');
-      elements.createFormInline.reset();
-      if (inlineUploader) inlineUploader.attachments = []; // clear tracking
-      loadAllData();
-      switchView('section-tickets');
-    } catch (err) {
-      console.error(err);
-      showToast('Error creating ticket.', 'error');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.innerText = 'Create Ticket';
-    }
-  });
-
-  // Dashboard View All button
-  elements.btnViewAllTickets.addEventListener('click', () => {
-    switchView('section-tickets');
-  });
-
-  // Filters Controls
-  elements.filterStatus.addEventListener('change', (e) => {
-    state.filters.status = e.target.value;
-    updateFiltersIndicator();
-    loadTickets();
-  });
-
-  elements.filterPriority.addEventListener('change', (e) => {
-    state.filters.priority = e.target.value;
-    updateFiltersIndicator();
-    loadTickets();
-  });
-
-  elements.btnClearFilters.addEventListener('click', () => {
-    elements.filterStatus.value = '';
-    elements.filterPriority.value = '';
-    elements.globalSearch.value = '';
-    state.filters.status = '';
-    state.filters.priority = '';
-    state.filters.search = '';
-    updateFiltersIndicator();
-    loadTickets();
-  });
-
-  // Global Search input (Debounced search on input or instant on enter)
-  let searchTimeout;
-  elements.globalSearch.addEventListener('input', (e) => {
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => {
-      state.filters.search = e.target.value;
-      updateFiltersIndicator();
-      // Auto-navigate to tickets section if search matches
-      if (state.activeSection !== 'section-tickets') {
-        switchView('section-tickets');
-      } else {
-        loadTickets();
-      }
-    }, 400);
-  });
-
-  // Theme Toggle Button
-  if (elements.themeToggle) {
-    elements.themeToggle.addEventListener('click', () => {
-      const isLight = document.body.classList.toggle('light-theme');
-      localStorage.setItem('theme', isLight ? 'light' : 'dark');
-      updateThemeIcon(isLight);
-      showToast(`${isLight ? 'Light' : 'Dark'} theme activated`, 'info');
-    });
-  }
-
-  // Go to register link
-  const linkGotoRegister = document.getElementById('link-goto-register');
-  if (linkGotoRegister) {
-    linkGotoRegister.addEventListener('click', (e) => {
-      e.preventDefault();
-      navigateTo('/register');
-    });
-  }
-
-  // Go to login link
-  const linkGotoLogin = document.getElementById('link-goto-login');
-  if (linkGotoLogin) {
-    linkGotoLogin.addEventListener('click', (e) => {
-      e.preventDefault();
-      navigateTo('/login');
-    });
-  }
-
-  // Sign out button
-  const btnLogout = document.getElementById('btn-logout');
-  if (btnLogout) {
-    btnLogout.addEventListener('click', () => {
-      handleLogout();
-    });
-  }
-
-  // Real-time password complexity checklist event listeners
-  const regPassword = document.getElementById('register-password');
-  const regPasswordConfirm = document.getElementById('register-password-confirm');
-  if (regPassword && regPasswordConfirm) {
-    const checkComplexity = () => {
-      validatePasswordComplexity(regPassword.value, regPasswordConfirm.value);
-    };
-    regPassword.addEventListener('input', checkComplexity);
-    regPasswordConfirm.addEventListener('input', checkComplexity);
-  }
-
-  // User Management Event Listeners
-  if (elements.navUsers) {
-    elements.navUsers.addEventListener('click', () => {
-      switchView('section-users');
-    });
-  }
-
-  // Reports Event Listeners
-  if (elements.navReports) {
-    elements.navReports.addEventListener('click', () => {
-      switchView('section-reports');
-    });
-  }
-
-  if (elements.btnCreateUser) {
-    elements.btnCreateUser.addEventListener('click', () => {
-      openUserModal();
-    });
-  }
-
-  // User search input
-  const userSearchInput = document.getElementById('user-search-input');
-  if (userSearchInput) {
-    let searchDebounce;
-    userSearchInput.addEventListener('input', () => {
-      clearTimeout(searchDebounce);
-      searchDebounce = setTimeout(() => {
-        loadUsers(userSearchInput.value.trim());
-      }, 250);
-    });
-  }
-
-  if (elements.btnCloseUserModal) {
-    elements.btnCloseUserModal.addEventListener('click', () => {
-      closeUserModal();
-    });
-  }
-
-  if (elements.btnCancelUserModal) {
-    elements.btnCancelUserModal.addEventListener('click', () => {
-      closeUserModal();
-    });
-  }
-
-  if (elements.formUser) {
-    elements.formUser.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await handleSaveUser();
-    });
-  }
-
-  if (elements.userPasswordField) {
-    elements.userPasswordField.addEventListener('input', (e) => {
-      validateUserPasswordComplexity(e.target.value);
-    });
-  }
-
-  // Initialize Password Toggle Buttons
-  document.querySelectorAll('.password-toggle').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      const wrapper = btn.closest('.password-wrapper');
-      const input = wrapper.querySelector('input');
-      if (input.type === 'password') {
-        input.type = 'text';
-        wrapper.classList.add('show-password');
-      } else {
-        input.type = 'password';
-        wrapper.classList.remove('show-password');
-      }
-    });
-  });
-
-  // Dashboard Stat Cards Click Handlers
-  const statCards = [
-    { selector: '.stat-card.stat-total', filters: { status: '', priority: '', search: '' } },
-    { selector: '.stat-card.stat-open', filters: { status: 'Open', priority: '', search: '' } },
-    { selector: '.stat-card.stat-pending', filters: { status: 'Pending', priority: '', search: '' } },
-    { selector: '.stat-card.stat-urgent', filters: { status: '', priority: 'Urgent', search: '' } }
-  ];
-
-  statCards.forEach(({ selector, filters }) => {
-    const cardEl = document.querySelector(selector);
-    if (cardEl) {
-      cardEl.addEventListener('click', () => {
-        state.filters.status = filters.status;
-        state.filters.priority = filters.priority;
-        state.filters.search = filters.search;
-        updateFiltersIndicator();
-        navigateTo('/tickets');
-      });
-    }
-  });
-
-  // Dashboard Status Distribution Click Handlers
-  document.querySelectorAll('.status-dist-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const statusValue = item.getAttribute('data-status');
-      if (statusValue) {
-        state.filters.status = statusValue;
-        state.filters.priority = '';
-        state.filters.search = '';
-        updateFiltersIndicator();
-        navigateTo('/tickets');
-      }
-    });
-  });
-}
-
-function resetPasswordVisibility() {
-  document.querySelectorAll('.password-wrapper').forEach(wrapper => {
-    wrapper.classList.remove('show-password');
-    const input = wrapper.querySelector('input');
-    if (input) {
-      input.type = 'password';
-    }
-  });
-}
-
-// --- Navigation & Routing Controllers ---
-function navigateTo(path) {
-  history.pushState(null, '', path);
-  handleRouting();
-}
-
-window.addEventListener('popstate', () => {
-  handleRouting();
-});
-
-async function checkAuth() {
-  const loadingScreen = document.getElementById('app-loading');
-  if (loadingScreen) loadingScreen.classList.remove('fade-out');
-
-  try {
-    const res = await fetch('/api/auth/me');
-    if (res.ok) {
-      const user = await res.json();
-      state.isAuthenticated = true;
-      state.user = user;
-      updateSidebarUI(user);
-    } else {
-      state.isAuthenticated = false;
-      state.user = null;
-    }
-  } catch (err) {
-    console.error('Auth verification failure:', err);
-    state.isAuthenticated = false;
-    state.user = null;
-  } finally {
-    if (loadingScreen) {
-      setTimeout(() => {
-        loadingScreen.classList.add('fade-out');
-      }, 300);
-    }
-  }
-}
-
-function handleRouting() {
-  resetPasswordVisibility();
-  const path = window.location.pathname;
-  
-  if (path === '/login' || path === '/register') {
-    document.body.classList.add('auth-mode');
-    if (path === '/login') {
-      switchSection('section-login');
-    } else {
-      switchSection('section-register');
-    }
-    return;
-  }
-
-  document.body.classList.remove('auth-mode');
-
-  if (!state.isAuthenticated) {
-    navigateTo(`/login?redirect=${encodeURIComponent(path)}`);
-    return;
-  }
-
-  // RBAC routing checks
-  if (state.user.role === 'Customer' && (path === '/' || path === '/dashboard')) {
-    navigateTo('/tickets');
-    return;
-  }
-
-  if (path === '/' || path === '/dashboard') {
-    switchSection('section-dashboard');
-  } else if (path === '/tickets') {
-    switchSection('section-tickets');
-  } else if (path === '/create-ticket') {
-    switchSection('section-create');
-  } else if (path === '/users') {
-    if (state.user && state.user.role === 'Agent') {
-      switchSection('section-users');
-    } else {
-      navigateTo('/tickets');
-    }
-  } else if (path === '/reports') {
-    if (state.user && state.user.role === 'Agent') {
-      switchSection('section-reports');
-    } else {
-      navigateTo('/tickets');
-    }
-  } else {
-    navigateTo(state.user.role === 'Agent' ? '/dashboard' : '/tickets');
-  }
-}
-
-function switchView(targetId) {
-  let path = '/dashboard';
-  if (targetId === 'section-tickets') path = '/tickets';
-  else if (targetId === 'section-create') path = '/create-ticket';
-  else if (targetId === 'section-users') path = '/users';
-  else if (targetId === 'section-reports') path = '/reports';
-  navigateTo(path);
-}
-
-function switchSection(targetId) {
-  elements.sections.forEach(section => {
-    if (section.id === targetId) {
-      section.classList.add('active');
-    } else {
-      section.classList.remove('active');
-    }
-  });
-
-  elements.navItems.forEach(item => {
-    if (item.getAttribute('data-target') === targetId) {
-      item.classList.add('active');
-    } else {
-      item.classList.remove('active');
-    }
-  });
-
-  state.activeSection = targetId;
-  
-  // Re-fetch data if switching to specific lists
-  if (targetId === 'section-tickets') {
-    loadTickets();
-  } else if (targetId === 'section-users') {
-    loadUsers();
-  } else if (targetId === 'section-reports') {
-    loadReportsData();
-  } else if (targetId === 'section-dashboard') {
-    if (state.user && state.user.role === 'Agent') {
-      loadStats();
-      loadUrgentTickets();
-    }
-  }
-}
-
-function updateSidebarUI(user) {
-  const sidebarName = document.getElementById('sidebar-user-name');
-  const sidebarRole = document.getElementById('sidebar-user-role');
-  const userAvatar = document.getElementById('user-avatar');
-  
-  if (sidebarName) sidebarName.innerText = user.username;
-  if (sidebarRole) sidebarRole.innerText = user.role;
-  if (userAvatar) userAvatar.innerText = user.username.charAt(0).toUpperCase();
-
-  // Hide dashboard button for customers
-  const navDashboard = document.getElementById('btn-nav-dashboard');
-  if (user.role === 'Customer') {
-    if (navDashboard) navDashboard.style.display = 'none';
-  } else {
-    if (navDashboard) navDashboard.style.display = 'flex';
-  }
-
-  // Toggle visibility of the Users & Reports sidebar menu buttons
-  const navUsers = document.getElementById('btn-nav-users');
-  const navReports = document.getElementById('btn-nav-reports');
-  if (user.role === 'Customer') {
-    if (navUsers) navUsers.style.display = 'none';
-    if (navReports) navReports.style.display = 'none';
-  } else {
-    if (navUsers) navUsers.style.display = 'flex';
-    if (navReports) navReports.style.display = 'flex';
-  }
-}
-
-// Password validation checking
-function validatePasswordComplexity(password, passwordConfirm) {
-  const requirements = {
-    length: password.length >= 10,
-    uppercase: /[A-Z]/.test(password),
-    lowercase: /[a-z]/.test(password),
-    number: /\d/.test(password),
-    special: /[@$!%*?&]/.test(password),
-    match: password === passwordConfirm && password !== ''
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
   };
-
-  updateComplexityItemUI('req-length', requirements.length);
-  updateComplexityItemUI('req-uppercase', requirements.uppercase);
-  updateComplexityItemUI('req-lowercase', requirements.lowercase);
-  updateComplexityItemUI('req-number', requirements.number);
-  updateComplexityItemUI('req-special', requirements.special);
-  updateComplexityItemUI('req-match', requirements.match);
-
-  const allMet = Object.values(requirements).every(val => val === true);
-  const btnSubmit = document.getElementById('btn-register-submit');
-  if (btnSubmit) {
-    btnSubmit.disabled = !allMet;
-  }
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  $('.modal-close', overlay).addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  if (onMount) onMount(overlay, close);
+  // Focus the first sensible control (respect autofocus, else first field/button)
+  const first = $('[autofocus]', overlay) || $('input, select, textarea', overlay) || $('.modal-close', overlay);
+  if (first) setTimeout(() => first.focus(), 20);
+  return { overlay, close };
 }
 
-function updateComplexityItemUI(elementId, isMet) {
-  const el = document.getElementById(elementId);
-  if (el) {
-    if (isMet) {
-      el.classList.add('met');
-      el.querySelector('.chk-icon').innerText = '✓';
-    } else {
-      el.classList.remove('met');
-      el.querySelector('.chk-icon').innerText = '✕';
-    }
-  }
+// Keep Tab focus cycling inside the open modal
+function trapFocus(e, overlay) {
+  const f = $$('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', overlay)
+    .filter((el) => el.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 }
 
-// Handle login, logout, registration and reauth forms
-const formLogin = document.getElementById('form-login');
-if (formLogin) {
-  formLogin.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const email = document.getElementById('login-email').value;
-    const password = document.getElementById('login-password').value;
-    const submitBtn = document.getElementById('btn-login-submit');
-
-    submitBtn.disabled = true;
-    submitBtn.innerText = 'Signing in...';
-
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      if (res.ok) {
-        const user = await res.json();
-        state.isAuthenticated = true;
-        state.user = user;
-        updateSidebarUI(user);
-        
-        showToast('Signed in successfully', 'success');
-        
-        const searchParams = new URLSearchParams(window.location.search);
-        const redirect = searchParams.get('redirect') || (user.role === 'Agent' ? '/dashboard' : '/tickets');
-        navigateTo(redirect);
-      } else {
-        const errData = await res.json();
-        showToast(errData.error || 'Invalid email or password', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Network error during sign in', 'error');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.innerText = 'Sign In';
-    }
-  });
-}
-
-const formRegister = document.getElementById('form-register');
-if (formRegister) {
-  formRegister.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const username = document.getElementById('register-username').value;
-    const email = document.getElementById('register-email').value;
-    const brand = document.getElementById('register-brand').value;
-    const password = document.getElementById('register-password').value;
-    const passwordConfirm = document.getElementById('register-password-confirm').value;
-    const submitBtn = document.getElementById('btn-register-submit');
-
-    submitBtn.disabled = true;
-    submitBtn.innerText = 'Registering...';
-
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password, passwordConfirm, brand })
-      });
-
-      if (res.ok) {
-        showToast('Account registered successfully! Please sign in.', 'success');
-        formRegister.reset();
-        validatePasswordComplexity('', ''); 
-        navigateTo('/login');
-      } else {
-        const errData = await res.json();
-        showToast(errData.error || 'Registration failed', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Network error during registration', 'error');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.innerText = 'Register Account';
-    }
-  });
-}
-
-async function handleLogout() {
-  try {
-    await fetch('/api/auth/logout', { method: 'POST' });
-  } catch (err) {
-    console.error('Logout error:', err);
-  } finally {
-    state.isAuthenticated = false;
-    state.user = null;
-    navigateTo('/login');
-    showToast('Signed out successfully', 'info');
-  }
-}
-
-let reauthPromiseResolve = null;
-
-function openReauthModal() {
+// Generic form modal → resolves with values object or null
+function formModal(title, fields, submitLabel = 'Save') {
   return new Promise((resolve) => {
-    const reauthModal = document.getElementById('reauth-modal');
-    const reauthEmail = document.getElementById('reauth-email');
-    const reauthPassword = document.getElementById('reauth-password');
-    
-    resetPasswordVisibility();
-    
-    if (reauthEmail) reauthEmail.value = state.user ? state.user.email : '';
-    if (reauthPassword) reauthPassword.value = '';
-    
-    if (reauthModal) reauthModal.classList.add('active');
-    if (reauthPassword) reauthPassword.focus();
-    
-    reauthPromiseResolve = resolve;
-  });
-}
-
-const formReauth = document.getElementById('form-reauth');
-if (formReauth) {
-  formReauth.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const password = document.getElementById('reauth-password').value;
-    const email = state.user ? state.user.email : '';
-    
-    const submitBtn = document.getElementById('btn-reauth-submit');
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.innerText = 'Verifying...';
-    }
-
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      if (res.ok) {
-        const user = await res.json();
-        state.isAuthenticated = true;
-        state.user = user;
-        
-        const reauthModal = document.getElementById('reauth-modal');
-        if (reauthModal) reauthModal.classList.remove('active');
-        
-        showToast('Session re-authenticated successfully', 'success');
-        if (reauthPromiseResolve) {
-          reauthPromiseResolve(true);
-          reauthPromiseResolve = null;
-        }
-      } else {
-        const errData = await res.json();
-        showToast(errData.error || 'Verification failed. Try again.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Network error during re-authentication', 'error');
-    } finally {
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.innerText = 'Confirm Password';
-      }
-    }
-  });
-}
-
-const btnReauthLogout = document.getElementById('btn-reauth-logout');
-if (btnReauthLogout) {
-  btnReauthLogout.addEventListener('click', async () => {
-    const reauthModal = document.getElementById('reauth-modal');
-    if (reauthModal) reauthModal.classList.remove('active');
-    
-    if (reauthPromiseResolve) {
-      reauthPromiseResolve(false);
-      reauthPromiseResolve = null;
-    }
-    
-    await handleLogout();
-  });
-}
-
-// --- Data Fetching Operations ---
-async function loadAllData() {
-  try {
-    const promises = [loadTickets()];
-    if (state.user && state.user.role === 'Agent') {
-      promises.push(loadStats());
-      promises.push(loadUrgentTickets());
-    }
-    await Promise.all(promises);
-  } catch (err) {
-    console.error('Error loading initialization details:', err);
-    showToast('Database sync issues. Please check if node is running.', 'error');
-  }
-}
-
-async function loadStats() {
-  try {
-    const stats = await api.getStats();
-    state.stats = stats;
-    
-    // Update Metrics
-    elements.statTotal.innerText = stats.total;
-    elements.statOpen.innerText = stats.open;
-    elements.statPending.innerText = stats.pending;
-    elements.statUrgent.innerText = stats.urgent;
-    
-    // Update Distribution counts
-    elements.distNew.innerText = stats.new;
-    elements.distOpen.innerText = stats.open;
-    elements.distPending.innerText = stats.pending;
-    elements.distSolved.innerText = stats.solved;
-    elements.distClosed.innerText = stats.closed;
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-async function loadUrgentTickets() {
-  try {
-    // Query tickets with priority Urgent
-    const urgentTickets = await api.getTickets({ priority: 'Urgent' });
-    
-    if (urgentTickets.length === 0) {
-      elements.urgentMiniList.innerHTML = `
-        <div class="empty-state" style="padding: 20px;">
-          <p>No urgent items outstanding. Good job!</p>
-        </div>
-      `;
-      return;
-    }
-
-    elements.urgentMiniList.innerHTML = '';
-    urgentTickets.slice(0, 3).forEach(ticket => {
-      const card = document.createElement('div');
-      card.className = 'ticket-mini-card';
-      
-      const badgeClass = getBadgeClass('status', ticket.status);
-      
-      card.innerHTML = `
-        <div class="ticket-mini-info">
-          <span class="ticket-mini-title">${ticket.title}</span>
-          <span class="ticket-mini-meta">Logged by ${ticket.customer_name} • ${formatDate(ticket.created_at)}</span>
-        </div>
-        <span class="badge ${badgeClass}">${ticket.status}</span>
-      `;
-      
-      card.addEventListener('click', () => {
-        switchView('section-tickets');
-        selectTicket(ticket.id);
-      });
-      
-      elements.urgentMiniList.appendChild(card);
+    const body = fields.map((f) => {
+      const id = 'fm_' + f.name;
+      let input;
+      if (f.type === 'textarea') input = `<textarea id="${id}" rows="${f.rows || 3}" placeholder="${esc(f.placeholder || '')}">${esc(f.value || '')}</textarea>`;
+      else if (f.type === 'select') input = `<select id="${id}">${f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === f.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
+      else if (f.type === 'checkbox') input = `<label class="row gap-sm" style="cursor:pointer"><input type="checkbox" id="${id}" ${f.value ? 'checked' : ''} style="width:auto"> ${esc(f.checkboxLabel || '')}</label>`;
+      else if (f.type === 'password') input = pwInput(id, `value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}"`);
+      else input = `<input type="${f.type || 'text'}" id="${id}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}">`;
+      return `<div class="field">${f.type === 'checkbox' ? '' : `<label for="${id}">${esc(f.label)}${f.required ? ' <span class="req-star">*</span>' : ''}</label>`}${input}${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>`;
+    }).join('');
+    const foot = `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-ok>${esc(submitLabel)}</button>`;
+    const { overlay, close } = openModal({
+      title, bodyHTML: body, footHTML: foot,
+      onMount(ov) {
+        $('[data-cancel]', ov).addEventListener('click', () => { close(); resolve(null); });
+        $('[data-ok]', ov).addEventListener('click', () => {
+          const vals = {};
+          for (const f of fields) {
+            const el = $('#fm_' + f.name, ov);
+            vals[f.name] = f.type === 'checkbox' ? el.checked : el.value.trim();
+            if (f.required && !vals[f.name]) { toast(`${f.label} is required`, 'error'); el.focus(); return; }
+          }
+          close(); resolve(vals);
+        });
+      },
     });
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-async function loadTickets() {
-  try {
-    const tickets = await api.getTickets(state.filters);
-    state.tickets = tickets;
-    renderTicketsTable(tickets);
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-// --- Renderers ---
-function renderTicketsTable(tickets) {
-  elements.ticketsTableBody.innerHTML = '';
-  
-  if (tickets.length === 0) {
-    elements.ticketsEmptyState.style.display = 'flex';
-    return;
-  }
-  
-  elements.ticketsEmptyState.style.display = 'none';
-
-  tickets.forEach(ticket => {
-    const row = document.createElement('tr');
-    
-    // Highlight if active
-    if (state.selectedTicketId === ticket.id) {
-      row.className = 'active-row';
-    }
-
-    const priorityBadge = getBadgeClass('priority', ticket.priority);
-    const statusBadge = getBadgeClass('status', ticket.status);
-
-    row.innerHTML = `
-      <td>
-        <div class="font-semibold ticket-title-text">${ticket.title}</div>
-        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top:2px;">#${ticket.id} • ${ticket.assignee_name}</div>
-      </td>
-      <td>
-        <div>${ticket.customer_name}</div>
-        <div style="font-size: 0.75rem; color: var(--text-muted);">${ticket.customer_email}</div>
-      </td>
-      <td><span class="badge ${priorityBadge}">${ticket.priority}</span></td>
-      <td><span class="badge ${statusBadge}">${ticket.status}</span></td>
-      <td style="font-size: 0.8rem; color: var(--text-muted);">${formatDate(ticket.updated_at)}</td>
-    `;
-
-    row.addEventListener('click', () => {
-      // Highlight row selection
-      const activeRow = elements.ticketsTableBody.querySelector('.active-row');
-      if (activeRow) activeRow.classList.remove('active-row');
-      row.classList.add('active-row');
-      
-      selectTicket(ticket.id);
-    });
-
-    elements.ticketsTableBody.appendChild(row);
   });
 }
 
-async function selectTicket(ticketId) {
-  state.selectedTicketId = ticketId;
-  
-  elements.detailEmptyState.style.display = 'none';
-  elements.detailContent.style.display = 'none';
-  
-  // Show loading indicator
-  const detailPanel = elements.detailPanel;
-  let loader = detailPanel.querySelector('.loading-state');
-  if (!loader) {
-    loader = document.createElement('div');
-    loader.className = 'loading-state';
-    loader.innerHTML = 'Loading ticket details...';
-    detailPanel.appendChild(loader);
-  } else {
-    loader.style.display = 'flex';
-  }
-
-  try {
-    const { ticket, comments, attachments } = await api.getTicketDetails(ticketId);
-    
-    // Remove loader
-    if (loader) loader.style.display = 'none';
-    
-    elements.detailContent.innerHTML = renderTicketDetailMarkup(ticket, comments, attachments);
-    elements.detailContent.style.display = 'flex';
-    
-    // Hook up detail action handlers dynamically
-    setupDetailActionListeners(ticket);
-  } catch (err) {
-    console.error(err);
-    if (loader) loader.style.display = 'none';
-    showToast('Failed to load details.', 'error');
-  }
-}
-
-function renderTicketDetailMarkup(ticket, comments, attachments = []) {
-  const statusBadge = getBadgeClass('status', ticket.status);
-  const priorityBadge = getBadgeClass('priority', ticket.priority);
-  
-  // Process attachments list HTML
-  let attachmentsHtml = '';
-  if (attachments && attachments.length > 0) {
-    attachmentsHtml = `
-      <div class="ticket-attachments-section">
-        <h4 class="attachments-section-title">Attachments</h4>
-        <div class="attachments-list">
-    `;
-    attachments.forEach(att => {
-      const isImage = att.mime_type.startsWith('image/');
-      const iconSvg = isImage ? `
-        <svg class="attachment-card-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-          <circle cx="8.5" cy="8.5" r="1.5"/>
-          <polyline points="21 15 16 10 5 21"/>
-        </svg>
-      ` : `
-        <svg class="attachment-card-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="23 7 16 12 23 17 23 7"/>
-          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-        </svg>
-      `;
-      attachmentsHtml += `
-        <a href="${att.file_url}" target="_blank" class="attachment-file-card" title="${att.file_name}">
-          ${iconSvg}
-          <span class="attachment-card-name">${att.file_name}</span>
-        </a>
-      `;
+// Re-auth modal (session expiry mid-action)
+function openReauth() {
+  if (reauthInFlight) return reauthInFlight;
+  reauthInFlight = new Promise((resolve) => {
+    const { overlay, close } = openModal({
+      title: 'Session expired',
+      bodyHTML: `<p class="muted mb">Please re-enter your password to continue.</p>
+        <div class="field"><label>Email</label><input value="${esc(state.user ? state.user.email : '')}" disabled></div>
+        <div class="field"><label>Password</label>${pwInput('reauth-pw', 'autofocus')}</div>`,
+      footHTML: `<button class="btn-ghost" data-out>Sign out</button><button class="btn-primary" data-go>Confirm</button>`,
+      onMount(ov) {
+        const finish = (val) => { close(); reauthInFlight = null; resolve(val); };
+        $('[data-out]', ov).addEventListener('click', async () => { finish(false); await doLogout(); });
+        $('[data-go]', ov).addEventListener('click', async () => {
+          const pw = $('#reauth-pw', ov).value;
+          try { await api.login(state.user.email, pw); toast('Session restored', 'success'); finish(true); }
+          catch (e) { toast('Wrong password', 'error'); }
+        });
+      },
     });
-    attachmentsHtml += `
-        </div>
-      </div>
-    `;
-  }
-
-  // Process comments timeline HTML
-  let commentsHtml = '';
-  if (comments.length === 0) {
-    commentsHtml = '<p style="color:var(--text-muted); font-size:0.85rem; font-style:italic;">No agent replies yet.</p>';
-  } else {
-    comments.forEach(c => {
-      let roleClass = 'customer-role';
-      if (c.author_role === 'Agent') roleClass = 'agent-role';
-      if (c.author_name === 'System') roleClass = 'system-role';
-
-      commentsHtml += `
-        <div class="comment-card ${roleClass}">
-          <div class="comment-header">
-            <span class="comment-author">${c.author_name} 
-              <span class="author-role-label">${c.author_role}</span>
-            </span>
-            <span class="comment-date">${formatDate(c.created_at)}</span>
-          </div>
-          <div class="comment-text">${c.message}</div>
-        </div>
-      `;
-    });
-  }
-
-  return `
-    <!-- Top info bar -->
-    <div class="detail-header">
-      <div class="detail-title-area">
-        <h2 class="detail-title">${ticket.title}</h2>
-        <div class="detail-meta-row">
-          <span>Ticket ID: <strong>#${ticket.id}</strong></span>
-          <span>•</span>
-          <span>Customer: <strong>${ticket.customer_name}</strong> (${ticket.customer_email})</span>
-        </div>
-      </div>
-      <div style="display:flex; gap: 8px;">
-        <span class="badge ${statusBadge}">${ticket.status}</span>
-        <span class="badge ${priorityBadge}">${ticket.priority}</span>
-      </div>
-    </div>
-
-    <!-- Body contents -->
-    <div class="detail-body-split">
-      
-      <!-- Timeline discussion (Left) -->
-      <div class="detail-timeline-pane">
-        <div class="original-description-box">
-          <span class="original-desc-box-label original-desc-label">Original Request</span>
-          <div class="comment-text" style="font-size:0.92rem;">${ticket.description}</div>
-          <div class="detail-meta-row" style="margin-top:12px; font-size: 0.75rem;">
-            <span>Submitted ${formatDate(ticket.created_at)}</span>
-          </div>
-        </div>
-        
-        ${attachmentsHtml}
-        
-        <div class="comments-timeline">
-          ${commentsHtml}
-        </div>
-        
-        <!-- Reply form input -->
-        <div class="comment-reply-box">
-          <div class="reply-input-wrapper">
-            <textarea id="reply-message" class="reply-textarea" rows="3" placeholder="Type a response to the customer..."></textarea>
-          </div>
-          <div class="reply-controls">
-            <div class="reply-role-selector">
-              <span>Respond as:</span>
-              <select id="reply-author-role" class="filter-select" style="padding:4px 8px;">
-                <option value="Agent">Agent (Support Desk)</option>
-                <option value="Customer">Customer (Emulated Client)</option>
-              </select>
-            </div>
-            <button class="btn btn-primary" id="btn-submit-reply">Send Reply</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Action Panel (Right) -->
-      <div class="detail-actions-pane">
-        <h3 class="actions-title">Ticket Options</h3>
-        
-        <div class="detail-form-group">
-          <label for="action-status">Status</label>
-          <select id="action-status" class="detail-select-input">
-            <option value="New" ${ticket.status === 'New' ? 'selected' : ''}>New</option>
-            <option value="Open" ${ticket.status === 'Open' ? 'selected' : ''}>Open</option>
-            <option value="Pending" ${ticket.status === 'Pending' ? 'selected' : ''}>Pending</option>
-            <option value="Solved" ${ticket.status === 'Solved' ? 'selected' : ''}>Solved</option>
-            <option value="Closed" ${ticket.status === 'Closed' ? 'selected' : ''}>Closed</option>
-          </select>
-        </div>
-
-        <div class="detail-form-group">
-          <label for="action-priority">Priority</label>
-          <select id="action-priority" class="detail-select-input">
-            <option value="Low" ${ticket.priority === 'Low' ? 'selected' : ''}>Low</option>
-            <option value="Medium" ${ticket.priority === 'Medium' ? 'selected' : ''}>Medium</option>
-            <option value="High" ${ticket.priority === 'High' ? 'selected' : ''}>High</option>
-            <option value="Urgent" ${ticket.priority === 'Urgent' ? 'selected' : ''}>Urgent</option>
-          </select>
-        </div>
-
-        <div class="detail-form-group">
-          <label for="action-assignee">Assignee</label>
-          <input type="text" id="action-assignee" class="detail-text-input" value="${ticket.assignee_name !== 'Unassigned' ? ticket.assignee_name : ''}" placeholder="Enter agent name...">
-        </div>
-
-        <button class="btn btn-secondary btn-update-details" id="btn-save-actions">Apply Changes</button>
-      </div>
-
-    </div>
-  `;
-}
-
-function setupDetailActionListeners(ticket) {
-  // 1. Save changes (Status, Priority, Assignee)
-  const saveBtn = document.getElementById('btn-save-actions');
-  saveBtn.addEventListener('click', async () => {
-    saveBtn.disabled = true;
-    saveBtn.innerText = 'Updating...';
-    
-    const updateData = {
-      status: document.getElementById('action-status').value,
-      priority: document.getElementById('action-priority').value,
-      assignee_name: document.getElementById('action-assignee').value.trim()
-    };
-
-    try {
-      await api.updateTicket(ticket.id, updateData);
-      showToast(`Ticket #${ticket.id} details saved`, 'success');
-      loadStats(); // reload numbers
-      loadUrgentTickets(); // reload list
-      loadTickets(); // reload grid
-      selectTicket(ticket.id); // re-render detail view with log notes
-    } catch (err) {
-      console.error(err);
-      showToast('Error saving updates.', 'error');
-      saveBtn.disabled = false;
-      saveBtn.innerText = 'Apply Changes';
-    }
   });
-
-  // 2. Submit reply/comment
-  const replyBtn = document.getElementById('btn-submit-reply');
-  replyBtn.addEventListener('click', async () => {
-    const textVal = document.getElementById('reply-message').value.trim();
-    if (!textVal) {
-      showToast('Please type a response before sending.', 'error');
-      return;
-    }
-    
-    replyBtn.disabled = true;
-    replyBtn.innerText = 'Sending...';
-
-    const authorRole = document.getElementById('reply-author-role').value;
-    const authorName = authorRole === 'Agent' ? 'Agent Admin' : ticket.customer_name;
-
-    const commentData = {
-      author_name: authorName,
-      author_role: authorRole,
-      message: textVal
-    };
-
-    try {
-      await api.addComment(ticket.id, commentData);
-      showToast('Response logged on ticket thread', 'success');
-      loadStats();
-      loadTickets();
-      selectTicket(ticket.id); // re-renders conversation timeline
-    } catch (err) {
-      console.error(err);
-      showToast('Error posting response.', 'error');
-      replyBtn.disabled = false;
-      replyBtn.innerText = 'Send Reply';
-    }
-  });
-}
-
-// --- UI Utility Helper Functions ---
-function updateFiltersIndicator() {
-  const isFiltered = state.filters.status || state.filters.priority || state.filters.search;
-  elements.btnClearFilters.style.display = isFiltered ? 'inline-block' : 'none';
-
-  if (elements.filterStatus) elements.filterStatus.value = state.filters.status || '';
-  if (elements.filterPriority) elements.filterPriority.value = state.filters.priority || '';
-  if (elements.globalSearch) elements.globalSearch.value = state.filters.search || '';
-
-  if (state.filters.search) {
-    elements.searchIndicator.style.display = 'block';
-    elements.searchTerm.innerText = state.filters.search;
-  } else {
-    elements.searchIndicator.style.display = 'none';
-  }
-}
-
-function getBadgeClass(type, value) {
-  if (type === 'status') {
-    switch (value) {
-      case 'New': return 'badge-status-new';
-      case 'Open': return 'badge-status-open';
-      case 'Pending': return 'badge-status-pending';
-      case 'Solved': return 'badge-status-solved';
-      case 'Closed': return 'badge-status-closed';
-      default: return 'badge-status-new';
-    }
-  } else {
-    switch (value) {
-      case 'Low': return 'badge-priority-low';
-      case 'Medium': return 'badge-priority-medium';
-      case 'High': return 'badge-priority-high';
-      case 'Urgent': return 'badge-priority-urgent';
-      default: return 'badge-priority-low';
-    }
-  }
-}
-
-function showToast(message, type = 'info') {
-  const toast = document.createElement('div');
-  toast.className = `toast toast-${type}`;
-  
-  let iconMarkup = '';
-  if (type === 'success') {
-    iconMarkup = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
-  } else if (type === 'error') {
-    iconMarkup = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
-  } else {
-    iconMarkup = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
-  }
-
-  toast.innerHTML = `
-    ${iconMarkup}
-    <span>${message}</span>
-  `;
-  
-  elements.toastContainer.appendChild(toast);
-  
-  // Animation delay trigger
-  setTimeout(() => {
-    toast.classList.add('show');
-  }, 10);
-
-  // Auto remove toast
-  setTimeout(() => {
-    toast.classList.remove('show');
-    setTimeout(() => {
-      toast.remove();
-    }, 350);
-  }, 3500);
-}
-
-function formatDate(dateString) {
-  if (!dateString) return '';
-  const date = new Date(dateString);
-  
-  // Format options
-  const diffTime = Math.abs(new Date() - date);
-  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-  
-  if (diffDays === 0) {
-    // Show time if it's today
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } else if (diffDays === 1) {
-    return 'Yesterday';
-  } else if (diffDays < 7) {
-    // Show day name
-    return date.toLocaleDateString([], { weekday: 'short' });
-  } else {
-    // Show standard date
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
-  }
+  return reauthInFlight;
 }
 
 // ==========================================================================
-// Reusable AttachmentUploader Class for Chunked/Direct Uploads
+// Attachment uploader (direct + chunked for video)
 // ==========================================================================
-class AttachmentUploader {
-  constructor(zoneId, inputId, previewListId) {
-    this.zone = document.getElementById(zoneId);
-    this.input = document.getElementById(inputId);
-    this.previewList = document.getElementById(previewListId);
-    this.attachments = []; // Array of { clientUuid, id, file, name, size, type, state, progress, errorMsg, xhr }
-    this.maxFiles = 5;
-    this.chunkSize = 2 * 1024 * 1024; // 2MB chunk sizes
-
-    if (this.zone && this.input && this.previewList) {
-      this.init();
+class Uploader {
+  constructor(zone, list) {
+    this.zone = zone; this.list = list; this.items = [];
+    this.chunkSize = 2 * 1024 * 1024;
+    const input = $('input[type=file]', zone);
+    zone.addEventListener('click', (e) => { if (e.target.closest('.preview-card')) return; input.click(); });
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('dragover'); this.add(e.dataTransfer.files); });
+    input.addEventListener('change', (e) => { this.add(e.target.files); input.value = ''; });
+  }
+  add(files) {
+    for (const file of files) {
+      if (this.items.length >= 5) { toast('Max 5 files', 'error'); return; }
+      const isImg = file.type.startsWith('image/'), isVid = file.type.startsWith('video/');
+      if (!isImg && !isVid) { toast('Unsupported: ' + file.name, 'error'); continue; }
+      if (isImg && file.size > 10 * 1024 * 1024) { toast('Image > 10MB: ' + file.name, 'error'); continue; }
+      if (isVid && file.size > 100 * 1024 * 1024) { toast('Video > 100MB: ' + file.name, 'error'); continue; }
+      const it = { uid: Math.random().toString(36).slice(2), file, name: file.name, size: file.size, type: file.type, id: null, state: 'uploading', xhr: null };
+      this.items.push(it); this.renderItem(it); this.start(it);
     }
   }
-
-  init() {
-    this.zone.addEventListener('click', (e) => {
-      if (e.target !== this.input && !e.target.closest('.preview-card')) {
-        this.input.click();
-      }
-    });
-
-    this.zone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      this.zone.classList.add('dragover');
-    });
-
-    this.zone.addEventListener('dragleave', () => {
-      this.zone.classList.remove('dragover');
-    });
-
-    this.zone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      this.zone.classList.remove('dragover');
-      if (e.dataTransfer.files) {
-        this.handleFiles(e.dataTransfer.files);
-      }
-    });
-
-    this.input.addEventListener('change', (e) => {
-      if (e.target.files) {
-        this.handleFiles(e.target.files);
-      }
-    });
-  }
-
-  handleFiles(files) {
-    Array.from(files).forEach(file => {
-      if (this.attachments.length >= this.maxFiles) {
-        showToast('Maximum of 5 attachments allowed per ticket.', 'error');
-        return;
-      }
-
-      const isImage = file.type.startsWith('image/');
-      const isVideo = file.type.startsWith('video/');
-
-      if (!isImage && !isVideo) {
-        showToast(`Unsupported file type: ${file.name}`, 'error');
-        return;
-      }
-
-      if (isImage && file.size > 10 * 1024 * 1024) {
-        showToast(`Image exceeds 10MB limit: ${file.name}`, 'error');
-        return;
-      }
-
-      if (isVideo && file.size > 100 * 1024 * 1024) {
-        showToast(`Video exceeds 100MB limit: ${file.name}`, 'error');
-        return;
-      }
-
-      const clientUuid = Math.random().toString(36).substring(2) + Date.now().toString(36);
-      const attachment = {
-        clientUuid,
-        id: null,
-        file,
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        state: 'uploading',
-        progress: 0,
-        errorMsg: '',
-        xhr: null,
-        chunksUploaded: 0,
-        totalChunks: 1
-      };
-
-      this.attachments.push(attachment);
-      this.renderPreview(attachment);
-      this.startUpload(attachment);
-    });
-
-    this.input.value = '';
-  }
-
-  renderPreview(attachment) {
+  renderItem(it) {
     const card = document.createElement('div');
-    card.className = 'preview-card';
-    card.id = `preview-${attachment.clientUuid}`;
-
-    const isImage = attachment.type.startsWith('image/');
-    
-    let mediaMarkup = '';
-    if (isImage) {
-      mediaMarkup = `<img class="preview-thumbnail" src="" alt="preview" style="display:none;">`;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const img = card.querySelector('.preview-thumbnail');
-        if (img) {
-          img.src = e.target.result;
-          img.style.display = 'block';
-          const icon = card.querySelector('.preview-icon-wrapper');
-          if (icon) icon.style.display = 'none';
-        }
+    card.className = 'preview-card'; card.id = 'pc_' + it.uid;
+    card.innerHTML = `<button class="pc-remove" title="Remove">&times;</button>
+      ${it.type.startsWith('image/') ? '<img alt="">' : svg('<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>', 24)}
+      <div class="pc-name" title="${esc(it.name)}">${esc(it.name)}</div>
+      <div class="pc-size">${fmtBytes(it.size)}</div>
+      <div class="pc-progress"><div class="pc-bar"></div></div>
+      <div class="pc-err" hidden></div>`;
+    if (it.type.startsWith('image/')) { const r = new FileReader(); r.onload = (e) => { const im = $('img', card); if (im) im.src = e.target.result; }; r.readAsDataURL(it.file); }
+    $('.pc-remove', card).addEventListener('click', (e) => { e.stopPropagation(); this.remove(it); });
+    this.list.appendChild(card);
+  }
+  bar(it) { const c = $('#pc_' + it.uid, this.list); return c ? $('.pc-bar', c) : null; }
+  setErr(it, msg) {
+    it.state = 'error'; const c = $('#pc_' + it.uid, this.list); if (!c) return;
+    const e = $('.pc-err', c); e.hidden = false; e.innerHTML = `${esc(msg)} <button class="pc-retry">Retry</button>`;
+    $('.pc-retry', e).addEventListener('click', (ev) => { ev.stopPropagation(); e.hidden = true; it.state = 'uploading'; this.start(it); });
+  }
+  start(it) { it.type.startsWith('video/') ? this.chunked(it) : this.direct(it); }
+  direct(it) {
+    const xhr = new XMLHttpRequest(); it.xhr = xhr;
+    xhr.open('POST', '/api/attachments/upload');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) { const b = this.bar(it); if (b) b.style.width = Math.round(e.loaded / e.total * 100) + '%'; } };
+    xhr.onload = () => { if (xhr.status === 201) { it.id = JSON.parse(xhr.responseText).id; it.state = 'done'; } else { this.setErr(it, this.err(xhr)); } };
+    xhr.onerror = () => this.setErr(it, 'Network error');
+    const fd = new FormData(); fd.append('file', it.file); xhr.send(fd);
+  }
+  chunked(it) {
+    const total = Math.ceil(it.size / this.chunkSize); it.total = total; it.idx = 0;
+    const next = () => {
+      if (it.state === 'error') return;
+      const start = it.idx * this.chunkSize, end = Math.min(start + this.chunkSize, it.size);
+      const xhr = new XMLHttpRequest(); it.xhr = xhr;
+      xhr.open('POST', '/api/attachments/upload-chunk');
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) { const b = this.bar(it); if (b) b.style.width = Math.min(99, Math.round((it.idx + e.loaded / e.total) / total * 100)) + '%'; } };
+      xhr.onload = () => {
+        if (xhr.status === 200 || xhr.status === 201) {
+          it.idx++;
+          if (it.idx < total) next();
+          else { it.id = JSON.parse(xhr.responseText).id; it.state = 'done'; const b = this.bar(it); if (b) b.style.width = '100%'; }
+        } else this.setErr(it, this.err(xhr));
       };
-      reader.readAsDataURL(attachment.file);
-    }
-
-    card.innerHTML = `
-      <button class="preview-remove-btn" title="Remove attachment" type="button">
-        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
-          <line x1="18" y1="6" x2="6" y2="18"></line>
-          <line x1="6" y1="6" x2="18" y2="18"></line>
-        </svg>
-      </button>
-      <button class="preview-retry-btn" title="Retry upload" type="button" style="display:none;">
-        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-        </svg>
-      </button>
-      <div class="preview-media-container">
-        <div class="preview-icon-wrapper">
-          ${isImage ? `
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-              <circle cx="8.5" cy="8.5" r="1.5"/>
-              <polyline points="21 15 16 10 5 21"/>
-            </svg>` : `
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-              <polygon points="23 7 16 12 23 17 23 7"/>
-              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-            </svg>`
-          }
-        </div>
-        ${mediaMarkup}
-      </div>
-      <div class="preview-info">
-        <span class="preview-name" title="${attachment.name}">${attachment.name}</span>
-        <span class="preview-size">${this.formatBytes(attachment.size)}</span>
-      </div>
-      <div class="preview-progress-container">
-        <div class="preview-progress-bar" id="progress-bar-${attachment.clientUuid}"></div>
-      </div>
-      <span class="preview-error-msg" id="error-${attachment.clientUuid}" style="display:none;"></span>
-    `;
-
-    card.querySelector('.preview-remove-btn').addEventListener('click', () => {
-      this.removeAttachment(attachment);
-    });
-
-    card.querySelector('.preview-retry-btn').addEventListener('click', () => {
-      this.retryUpload(attachment);
-    });
-
-    this.previewList.appendChild(card);
-  }
-
-  updateProgress(attachment, progressVal) {
-    attachment.progress = progressVal;
-    const bar = document.getElementById(`progress-bar-${attachment.clientUuid}`);
-    if (bar) {
-      bar.style.width = `${progressVal}%`;
-    }
-  }
-
-  startUpload(attachment) {
-    if (attachment.type.startsWith('video/')) {
-      this.uploadChunked(attachment);
-    } else {
-      this.uploadDirect(attachment);
-    }
-  }
-
-  uploadDirect(attachment) {
-    const xhr = new XMLHttpRequest();
-    attachment.xhr = xhr;
-    
-    xhr.open('POST', '/api/attachments/upload', true);
-    
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        this.updateProgress(attachment, pct);
-      }
-    });
-
-    xhr.onload = () => {
-      if (xhr.status === 201) {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          attachment.id = res.id;
-          attachment.state = 'success';
-          this.setSuccessUI(attachment);
-        } catch (err) {
-          this.setErrorUI(attachment, 'Parse error');
-        }
-      } else {
-        let msg = 'Upload failed';
-        try {
-          msg = JSON.parse(xhr.responseText).error || msg;
-        } catch (e) {}
-        this.setErrorUI(attachment, msg);
-      }
+      xhr.onerror = () => this.setErr(it, 'Network error');
+      const fd = new FormData();
+      fd.append('fileId', it.uid); fd.append('chunkIndex', it.idx); fd.append('totalChunks', total);
+      fd.append('fileName', it.name); fd.append('mimeType', it.type); fd.append('fileSize', it.size);
+      fd.append('chunk', it.file.slice(start, end), it.name);
+      xhr.send(fd);
     };
-
-    xhr.onerror = () => {
-      this.setErrorUI(attachment, 'Network error');
-    };
-
-    const formData = new FormData();
-    formData.append('file', attachment.file);
-    xhr.send(formData);
+    next();
   }
-
-  uploadChunked(attachment) {
-    const totalChunks = Math.ceil(attachment.size / this.chunkSize);
-    attachment.totalChunks = totalChunks;
-    attachment.chunksUploaded = 0;
-    
-    this.uploadNextChunk(attachment);
-  }
-
-  uploadNextChunk(attachment) {
-    if (attachment.state === 'error') return;
-
-    const start = attachment.chunksUploaded * this.chunkSize;
-    const end = Math.min(start + this.chunkSize, attachment.size);
-    const chunkBlob = attachment.file.slice(start, end);
-
-    const xhr = new XMLHttpRequest();
-    attachment.xhr = xhr;
-
-    xhr.open('POST', '/api/attachments/upload-chunk', true);
-
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        const currentChunkPct = e.loaded / e.total;
-        const totalProgress = Math.round(
-          ((attachment.chunksUploaded + currentChunkPct) / attachment.totalChunks) * 100
-        );
-        this.updateProgress(attachment, Math.min(totalProgress, 99));
-      }
-    });
-
-    xhr.onload = () => {
-      if (xhr.status === 200 || xhr.status === 201) {
-        attachment.chunksUploaded++;
-        
-        if (attachment.chunksUploaded < attachment.totalChunks) {
-          this.uploadNextChunk(attachment);
-        } else {
-          try {
-            const res = JSON.parse(xhr.responseText);
-            attachment.id = res.id;
-            attachment.state = 'success';
-            this.updateProgress(attachment, 100);
-            this.setSuccessUI(attachment);
-          } catch (e) {
-            this.setErrorUI(attachment, 'Finalize error');
-          }
-        }
-      } else {
-        let msg = 'Upload failed';
-        try {
-          msg = JSON.parse(xhr.responseText).error || msg;
-        } catch (e) {}
-        this.setErrorUI(attachment, msg);
-      }
-    };
-
-    xhr.onerror = () => {
-      this.setErrorUI(attachment, 'Network error');
-    };
-
-    const formData = new FormData();
-    formData.append('fileId', attachment.clientUuid);
-    formData.append('chunkIndex', attachment.chunksUploaded.toString());
-    formData.append('totalChunks', attachment.totalChunks.toString());
-    formData.append('fileName', attachment.name);
-    formData.append('mimeType', attachment.type);
-    formData.append('fileSize', attachment.size.toString());
-    formData.append('chunk', chunkBlob, attachment.name);
-
-    xhr.send(formData);
-  }
-
-  setSuccessUI(attachment) {
-    const card = document.getElementById(`preview-${attachment.clientUuid}`);
-    if (card) {
-      const progressContainer = card.querySelector('.preview-progress-container');
-      if (progressContainer) progressContainer.style.display = 'none';
-      const retryBtn = card.querySelector('.preview-retry-btn');
-      if (retryBtn) retryBtn.style.display = 'none';
-      const errorMsg = card.querySelector('.preview-error-msg');
-      if (errorMsg) errorMsg.style.display = 'none';
-    }
-  }
-
-  setErrorUI(attachment, errorMsg) {
-    attachment.state = 'error';
-    const card = document.getElementById(`preview-${attachment.clientUuid}`);
-    if (card) {
-      const bar = card.querySelector('.preview-progress-bar');
-      if (bar) bar.style.backgroundColor = 'var(--priority-urgent)';
-      const retryBtn = card.querySelector('.preview-retry-btn');
-      if (retryBtn) retryBtn.style.display = 'block';
-      const errorSpan = card.querySelector('.preview-error-msg');
-      if (errorSpan) {
-        errorSpan.innerText = errorMsg;
-        errorSpan.style.display = 'block';
-      }
-    }
-  }
-
-  retryUpload(attachment) {
-    attachment.state = 'uploading';
-    attachment.progress = 0;
-    
-    const card = document.getElementById(`preview-${attachment.clientUuid}`);
-    if (card) {
-      const bar = card.querySelector('.preview-progress-bar');
-      if (bar) bar.style.backgroundColor = 'var(--color-primary)';
-      const retryBtn = card.querySelector('.preview-retry-btn');
-      if (retryBtn) retryBtn.style.display = 'none';
-      const errorSpan = card.querySelector('.preview-error-msg');
-      if (errorSpan) {
-        errorSpan.style.display = 'none';
-        errorSpan.innerText = '';
-      }
-      const progressContainer = card.querySelector('.preview-progress-container');
-      if (progressContainer) progressContainer.style.display = 'block';
-    }
-
-    this.startUpload(attachment);
-  }
-
-  removeAttachment(attachment) {
-    if (attachment.xhr) {
-      attachment.xhr.abort();
-    }
-
-    if (attachment.id) {
-      fetch(`/api/attachments/${attachment.id}`, { method: 'DELETE' }).catch(err => console.error(err));
-    }
-
-    this.attachments = this.attachments.filter(a => a.clientUuid !== attachment.clientUuid);
-    const card = document.getElementById(`preview-${attachment.clientUuid}`);
-    if (card) card.remove();
-  }
-
-  clearAll() {
-    this.attachments.forEach(attachment => {
-      if (attachment.xhr) {
-        attachment.xhr.abort();
-      }
-      if (attachment.id) {
-        fetch(`/api/attachments/${attachment.id}`, { method: 'DELETE' }).catch(err => console.error(err));
-      }
-    });
-    this.attachments = [];
-    if (this.previewList) this.previewList.innerHTML = '';
-  }
-
-  isUploading() {
-    return this.attachments.some(a => a.state === 'uploading');
-  }
-
-  getUploadedIds() {
-    return this.attachments.filter(a => a.state === 'success').map(a => a.id);
-  }
-
-  formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-  }
+  err(xhr) { try { return JSON.parse(xhr.responseText).error; } catch (_) { return 'Upload failed'; } }
+  remove(it) { if (it.xhr) it.xhr.abort(); if (it.id) rawFetch('/api/attachments/' + it.id, { method: 'DELETE' }).catch(() => {}); this.items = this.items.filter((x) => x !== it); const c = $('#pc_' + it.uid, this.list); if (c) c.remove(); }
+  uploading() { return this.items.some((i) => i.state === 'uploading'); }
+  ids() { return this.items.filter((i) => i.state === 'done').map((i) => i.id); }
+  clear() { this.items.forEach((i) => { if (i.xhr) i.xhr.abort(); }); this.items = []; this.list.innerHTML = ''; }
+}
+function uploadZoneHTML(id) {
+  return `<div class="upload-zone" id="${id}">
+    <input type="file" multiple accept="image/*,video/mp4,video/webm,video/quicktime">
+    ${svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>', 26)}
+    <p>Tap to add or drop photos/videos</p>
+    <p class="hint">Images &lt;10MB · Videos &lt;100MB · max 5</p>
+  </div><div class="preview-list" id="${id}-list"></div>`;
 }
 
-// --- User Management Helper Functions ---
-function openUserModal(user = null) {
-  if (!elements.userModal) return;
-  
-  elements.formUser.reset();
-  elements.userPasswordComplexity.style.display = 'none';
-  elements.userPasswordField.required = !user; // password required only for new users
-
-  if (user) {
-    elements.userModalTitle.innerText = 'Edit User';
-    elements.userIdField.value = user.id;
-    elements.userUsernameField.value = user.username;
-    elements.userEmailField.value = user.email;
-    elements.userRoleField.value = user.role;
-    elements.userBrandField.value = user.brand || '';
-    elements.userPasswordField.placeholder = 'Leave blank to keep current password';
-  } else {
-    elements.userModalTitle.innerText = 'Add New User';
-    elements.userIdField.value = '';
-    elements.userBrandField.value = '';
-    elements.userPasswordField.placeholder = 'Minimum 10 characters';
-  }
-
-  elements.userModal.classList.add('active');
+// ==========================================================================
+// Auth screens
+// ==========================================================================
+function renderAuth(mode) {
+  $('#app-shell').hidden = true;
+  const root = $('#auth-root'); root.hidden = false;
+  if (mode === 'register') return renderRegister(root);
+  root.innerHTML = `
+    <form class="auth-card" id="login-form">
+      <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
+      <div class="auth-title">Sign in</div>
+      <div class="auth-sub">Report & track operational issues</div>
+      <div class="field"><label>Email</label><input type="email" id="li-email" required autocomplete="username"></div>
+      <div class="field"><label>Password</label>${pwInput('li-pw', 'required autocomplete="current-password"')}</div>
+      <button class="btn-primary btn-block" id="li-submit">Sign in</button>
+      <div class="auth-switch">No account? <a href="/register" data-nav>Register</a></div>
+    </form>`;
+  $('#login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#li-submit'); btn.disabled = true; btn.textContent = 'Signing in…';
+    try {
+      state.user = await api.login($('#li-email').value.trim(), $('#li-pw').value);
+      const p = new URLSearchParams(location.search).get('redirect');
+      boot(); navigate(p || defaultRoute());
+    } catch (err) { toast(err.message || 'Login failed', 'error'); btn.disabled = false; btn.textContent = 'Sign in'; }
+  });
 }
-
-function closeUserModal() {
-  if (elements.userModal) {
-    elements.userModal.classList.remove('active');
-    elements.formUser.reset();
-    resetPasswordVisibility();
-  }
-}
-
-function validateUserPasswordComplexity(password) {
-  if (!password) {
-    elements.userPasswordComplexity.style.display = 'none';
-    return;
-  }
-  elements.userPasswordComplexity.style.display = 'block';
-
-  const requirements = {
-    'user-req-length': password.length >= 10,
-    'user-req-uppercase': /[A-Z]/.test(password),
-    'user-req-lowercase': /[a-z]/.test(password),
-    'user-req-number': /\d/.test(password),
-    'user-req-special': /[@$!%*?&]/.test(password)
+async function renderRegister(root) {
+  let brands = [];
+  try { brands = await api.brands(); } catch (_) {}
+  root.innerHTML = `
+    <form class="auth-card" id="reg-form">
+      <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
+      <div class="auth-title">Create account</div>
+      <div class="auth-sub">For outlet requestors</div>
+      <div class="field"><label>Full name <span class="req-star">*</span></label><input id="rg-name" required></div>
+      <div class="field"><label>Email <span class="req-star">*</span></label><input type="email" id="rg-email" required></div>
+      <div class="field"><label>Brand (optional)</label><select id="rg-brand"><option value="">—</option>${brands.map((b) => `<option value="${esc(b.code)}">${esc(b.code)}</option>`).join('')}</select></div>
+      <div class="field"><label>Password <span class="req-star">*</span></label>${pwInput('rg-pw', 'required autocomplete="new-password"')}</div>
+      <div class="field"><label>Confirm password <span class="req-star">*</span></label>${pwInput('rg-pw2', 'required autocomplete="new-password"')}</div>
+      <div class="checklist" id="rg-ck"></div>
+      <button class="btn-primary btn-block mt" id="rg-submit" disabled>Register</button>
+      <div class="auth-switch">Have an account? <a href="/login" data-nav>Sign in</a></div>
+    </form>`;
+  const reqs = [['len', '10+ characters', (p) => p.length >= 10], ['up', 'Uppercase', (p) => /[A-Z]/.test(p)],
+    ['lo', 'Lowercase', (p) => /[a-z]/.test(p)], ['no', 'Number', (p) => /\d/.test(p)],
+    ['sp', 'Special (!@#$…)', (p) => /[@$!%*?&]/.test(p)], ['mt', 'Passwords match', (p, c) => p && p === c]];
+  const ck = $('#rg-ck'); ck.innerHTML = reqs.map((r) => `<div class="ck" data-r="${r[0]}">✕ ${r[1]}</div>`).join('');
+  const val = () => {
+    const p = $('#rg-pw').value, c = $('#rg-pw2').value; let all = true;
+    reqs.forEach((r) => { const ok = r[2](p, c); const el = $(`[data-r="${r[0]}"]`, ck); el.classList.toggle('met', ok); el.textContent = (ok ? '✓ ' : '✕ ') + r[1]; if (!ok) all = false; });
+    $('#rg-submit').disabled = !all;
   };
-
-  let allMet = true;
-  for (const [id, isMet] of Object.entries(requirements)) {
-    const el = document.getElementById(id);
-    if (el) {
-      if (isMet) {
-        el.classList.add('met');
-        el.querySelector('.chk-icon').innerText = '✓';
-        el.querySelector('.chk-icon').style.color = '#10b981';
-      } else {
-        el.classList.remove('met');
-        el.querySelector('.chk-icon').innerText = '✕';
-        el.querySelector('.chk-icon').style.color = '#ef4444';
-        allMet = false;
-      }
-    }
-  }
-  
-  const saveBtn = document.getElementById('btn-save-user');
-  if (saveBtn) {
-    saveBtn.disabled = !allMet;
-  }
+  $('#rg-pw').addEventListener('input', val); $('#rg-pw2').addEventListener('input', val);
+  $('#reg-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#rg-submit'); btn.disabled = true; btn.textContent = 'Registering…';
+    try {
+      await api.register({ username: $('#rg-name').value.trim(), email: $('#rg-email').value.trim(), brand: $('#rg-brand').value, password: $('#rg-pw').value, passwordConfirm: $('#rg-pw2').value });
+      toast('Account created — please sign in', 'success'); navigate('/login');
+    } catch (err) { toast(err.message, 'error'); btn.disabled = false; btn.textContent = 'Register'; }
+  });
 }
 
-async function handleSaveUser() {
-  const id = elements.userIdField.value;
-  const username = elements.userUsernameField.value.trim();
-  const email = elements.userEmailField.value.trim();
-  const password = elements.userPasswordField.value;
-  const role = elements.userRoleField.value;
-  const brand = elements.userBrandField.value || null;
+// ==========================================================================
+// Shell / navigation
+// ==========================================================================
+function defaultRoute() {
+  const r = state.user.role;
+  if (r === 'Requestor' || r === 'TechnicianIT' || r === 'TechnicianME') return '/tickets';
+  return '/dashboard';
+}
+function boot() {
+  $('#auth-root').hidden = true;
+  $('#app-shell').hidden = false;
+  const u = state.user;
+  $('#user-avatar').textContent = (u.username || '?').charAt(0).toUpperCase();
+  $('#user-name').textContent = u.username;
+  $('#user-role').textContent = u.role;
+  $('#btn-report-quick').style.display = CAN_CREATE.includes(u.role) ? '' : 'none';
+  renderNav();
+}
+function renderNav() {
+  const keys = NAV[state.user.role] || ['tickets'];
+  const items = keys.map((k) => `<button class="nav-item" data-route="${k}">${svg(ICONS[NAV_META[k].icon], 19)}<span>${navLabel(k)}</span></button>`).join('');
+  $('#nav-menu').innerHTML = items;
+  $('#bottom-nav').innerHTML = keys.slice(0, 5).map((k) => `<button class="bn-item" data-route="${k}">${svg(ICONS[NAV_META[k].icon], 21)}<span>${navLabel(k)}</span></button>`).join('');
+  $$('[data-route]').forEach((b) => b.addEventListener('click', () => { navigate('/' + b.dataset.route); closeDrawer(); }));
+}
+function navLabel(k) {
+  if (k === 'tickets' && (state.user.role === 'Requestor')) return 'My Tickets';
+  if (k === 'tickets' && (state.user.role.startsWith('Technician'))) return 'My Jobs';
+  return NAV_META[k].label;
+}
+function setActiveNav(name) {
+  $$('.nav-item, .bn-item').forEach((b) => {
+    const on = b.dataset.route === name;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  $('#page-title').textContent = name === 'tickets' ? navLabel('tickets') : (NAV_META[name] ? NAV_META[name].label : 'Ticket');
+}
+function openDrawer() { $('#app-shell').classList.add('drawer-open'); $('#drawer-overlay').hidden = false; }
+function closeDrawer() { $('#app-shell').classList.remove('drawer-open'); $('#drawer-overlay').hidden = true; }
 
-  const userData = { username, email, role, brand };
-  if (password) {
-    userData.password = password;
+// ==========================================================================
+// Router
+// ==========================================================================
+function navigate(path) { history.pushState(null, '', path); route(); }
+window.addEventListener('popstate', route);
+
+async function route() {
+  const path = location.pathname;
+  if (!state.user) {
+    if (path === '/register') return renderAuth('register');
+    return renderAuth('login');
   }
+  const parts = path.split('/').filter(Boolean);
+  let name = parts[0] || defaultRoute().slice(1);
+  const id = parts[1] || null;
 
-  const saveBtn = document.getElementById('btn-save-user');
-  saveBtn.disabled = true;
-  saveBtn.innerText = 'Saving...';
+  // RBAC route guard (mirror backend; backend is source of truth)
+  const allowed = NAV[state.user.role] || [];
+  if (name === 'tickets' && id) { state.route = { name: 'ticket', id }; setActiveNav('tickets'); animateViewIn(); return renderTicketDetail(id); }
+  if (!allowed.includes(name) && !['ticket'].includes(name)) { return navigate(defaultRoute()); }
+  state.route = { name, id };
+  setActiveNav(name);
+  animateViewIn();
+  const map = { dashboard: renderDashboard, tickets: renderTickets, queue: renderQueue, schedules: renderSchedules, reports: renderReports, users: renderUsers };
+  (map[name] || renderDashboard)();
+}
 
+// Retrigger the entrance animation on the view container each route change
+function animateViewIn() {
+  const v = view();
+  v.classList.remove('view-anim');
+  void v.offsetWidth; // reflow so the animation restarts
+  v.classList.add('view-anim');
+}
+
+// ==========================================================================
+// View: Dashboard
+// ==========================================================================
+async function renderDashboard() {
+  view().innerHTML = `<div class="page-head"><h2>Dashboard</h2><p>Live operational overview</p></div>
+    <div class="stat-grid" id="d-stats">${skeletonStats()}</div><div id="d-rest"></div>`;
   try {
-    if (id) {
-      // Edit
-      await api.updateUser(id, userData);
-      showToast('User details updated successfully', 'success');
-    } else {
-      // Create
-      if (!password) {
-        showToast('Password is required for new users', 'error');
-        saveBtn.disabled = false;
-        saveBtn.innerText = 'Save User';
-        return;
-      }
-      await api.createUser({ ...userData, password });
-      showToast('New user account provisioned', 'success');
-    }
-    closeUserModal();
-    loadUsers();
-  } catch (err) {
-    console.error(err);
-    showToast(err.message || 'Error saving user details', 'error');
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.innerText = 'Save User';
-  }
+    const d = await api.dashboard();
+    $('#d-stats').innerHTML = `
+      ${statCard(d.totals.total, 'Total tickets', 'primary')}
+      ${statCard(d.totals.open, 'Open', 'warn')}
+      ${statCard(d.totals.unassigned, 'Unassigned', 'danger')}
+      ${statCard(d.totals.waiting, 'Waiting parts/vendor')}
+      ${statCard(d.avg_resolution_hours != null ? d.avg_resolution_hours + 'h' : '—', 'Avg resolution', 'ok')}`;
+    animateCounters($('#d-stats'));
+    const distMax = Math.max(1, ...d.byStatus.map((s) => s.c));
+    $('#d-rest').innerHTML = `
+      <div class="grid-2">
+        <div class="panel"><div class="panel-head"><h3>By status</h3></div><div class="card" style="border:none">
+          ${d.byStatus.length ? d.byStatus.map((s) => `<div class="dist-row"><span>${badge(s.status)}</span><div class="row" style="flex:1;margin:0 12px"><div class="dist-bar ${stCls(s.status)}" style="width:${Math.round(s.c / distMax * 100)}%;background:currentColor;opacity:.5"></div></div><strong>${s.c}</strong></div>`).join('') : '<p class="muted">No data</p>'}
+        </div></div>
+        <div class="panel"><div class="panel-head"><h3>By department</h3></div><div class="card" style="border:none">
+          ${d.byDept.filter((x) => x.department).map((s) => `<div class="dist-row"><span>${deptTag(s.department)}</span><strong>${s.c}</strong></div>`).join('') || '<p class="muted">No data</p>'}
+          <div class="divider"></div><h3 style="font-size:.85rem;margin-bottom:6px">Top outlets</h3>
+          ${d.byOutlet.filter((x) => x.outlet_code).slice(0, 6).map((s) => `<div class="dist-row"><span>${esc(s.outlet_code)}</span><strong>${s.c}</strong></div>`).join('') || '<p class="muted">No data</p>'}
+        </div></div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="panel"><div class="panel-head"><h3>Recurring categories</h3></div><div class="card" style="border:none">
+          ${d.topCategories.length ? d.topCategories.map((c) => `<div class="dist-row"><span>${deptTag(c.department)} ${esc(c.category)}</span><strong>${c.c}</strong></div>`).join('') : '<p class="muted">No data</p>'}
+        </div></div>
+        ${d.workload && d.workload.length ? `<div class="panel"><div class="panel-head"><h3>Technician workload</h3></div><div class="card" style="border:none">
+          ${d.workload.map((w) => `<div class="dist-row"><span>${esc(w.technician)} ${deptTag(w.department)}</span><strong>${w.open} open</strong></div>`).join('')}
+        </div></div>` : ''}
+      </div>`;
+  } catch (e) { $('#d-rest').innerHTML = errBox(e); }
 }
+function statCard(n, l, accent) { return `<div class="stat ${accent ? 'accent-' + accent : ''}"><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`; }
+// Count-up animation for numeric stat values (preserves any suffix like "h")
+function animateCounters(root) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  $$('.stat .n', root).forEach((el) => {
+    const m = /^(\d+)(.*)$/.exec(el.textContent.trim());
+    if (!m) return;
+    const target = Number(m[1]), suffix = m[2] || '';
+    if (target <= 0) return;
+    const dur = 650, t0 = performance.now();
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      el.textContent = Math.round(target * eased) + suffix;
+      if (p < 1) requestAnimationFrame(step);
+    };
+    el.textContent = '0' + suffix;
+    requestAnimationFrame(step);
+  });
+}
+function skeletonStats() { return Array(5).fill('<div class="stat"><span class="n">—</span><span class="l">Loading…</span></div>').join(''); }
 
-// --- User Management State ---
-let _allUsers = [];
-let _userPage = 1;
-const USERS_PER_PAGE = 5;
-
-async function loadUsers(searchTerm = '') {
-  if (!elements.usersTableBody) return;
-
-  // Persist the current search term for reloads after delete/save
-  const input = document.getElementById('user-search-input');
-  if (input && !searchTerm && input.value.trim()) {
-    searchTerm = input.value.trim();
-  }
-
-  elements.usersTableBody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 24px; color: var(--text-muted);">Loading users list...</td></tr>';
-  elements.usersEmptyState.style.display = 'none';
-
+// ==========================================================================
+// View: Tickets list
+// ==========================================================================
+const listFilters = { status: '', urgency: '', department: '', search: '' };
+async function renderTickets() {
+  const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
+  view().innerHTML = `
+    <div class="page-head"><h2>${navLabel('tickets')}</h2><p>${ticketsSubtitle()}</p></div>
+    <div class="toolbar">
+      <div class="search"><input id="f-search" placeholder="Search subject, #, requester…" value="${esc(listFilters.search)}"></div>
+      <select id="f-status"><option value="">All statuses</option>${STATUSES.map((s) => `<option ${listFilters.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select id="f-urg"><option value="">All urgency</option>${URGENCIES.map((s) => `<option ${listFilters.urgency === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      ${showDept ? `<select id="f-dept"><option value="">All depts</option><option ${listFilters.department === 'IT' ? 'selected' : ''}>IT</option><option ${listFilters.department === 'ME' ? 'selected' : ''}>ME</option></select>` : ''}
+    </div>
+    <div id="ticket-list" class="ticket-list">${skeletonRows()}</div>`;
+  $('#f-search').addEventListener('input', debounce((e) => { listFilters.search = e.target.value.trim(); loadTicketList(); }, 350));
+  $('#f-status').addEventListener('change', (e) => { listFilters.status = e.target.value; loadTicketList(); });
+  $('#f-urg').addEventListener('change', (e) => { listFilters.urgency = e.target.value; loadTicketList(); });
+  if (showDept) $('#f-dept').addEventListener('change', (e) => { listFilters.department = e.target.value; loadTicketList(); });
+  loadTicketList();
+}
+function ticketsSubtitle() {
+  const r = state.user.role;
+  if (r === 'Requestor') return 'Issues you have reported';
+  if (r.startsWith('Technician')) return 'Jobs assigned to you';
+  if (r === 'Leader') return 'View-only across your scope';
+  return 'Manage and respond to tickets';
+}
+async function loadTicketList() {
+  const qs = new URLSearchParams();
+  Object.entries(listFilters).forEach(([k, v]) => { if (v) qs.append(k, v); });
   try {
-    const users = await api.getUsers();
-    _allUsers = searchTerm
-      ? users.filter(u =>
-          u.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          u.email.toLowerCase().includes(searchTerm.toLowerCase())
-        )
-      : users;
-
-    // Reset to page 1 when search changes
-    _userPage = 1;
-    renderUsersTable();
-  } catch (err) {
-    console.error(err);
-    elements.usersTableBody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 24px; color: var(--priority-urgent);">Error loading users.</td></tr>';
-  }
+    const rows = await api.tickets(qs.toString());
+    const box = $('#ticket-list'); if (!box) return;
+    if (!rows.length) { box.innerHTML = emptyBox('ticket', 'No tickets', CAN_CREATE.includes(state.user.role) ? 'Tap “Report Issue” to create one.' : 'Nothing here yet.'); return; }
+    box.innerHTML = rows.map(ticketRow).join('');
+    $$('.ticket-row', box).forEach((el) => el.addEventListener('click', () => navigate('/tickets/' + el.dataset.id)));
+  } catch (e) { const box = $('#ticket-list'); if (box) box.innerHTML = errBox(e); }
+}
+function ticketRow(t) {
+  return `<div class="ticket-row" data-id="${t.id}">
+    <div>${deptTag(t.department)}</div>
+    <div style="min-width:0">
+      <div class="tnum">${esc(t.ticket_number || '#' + t.id)}</div>
+      <div class="ttitle">${esc(t.title)}</div>
+      <div class="tmeta"><span>${esc(t.outlet_code || '—')}${t.brand_code ? ' · ' + esc(t.brand_code) : ''}</span><span>${esc(t.category || '')}</span><span>${esc(t.assignee_name && t.assignee_name !== 'Unassigned' ? '👤 ' + t.assignee_name : 'Unassigned')}</span><span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div>
+    </div>
+    <div class="tbadges">${urgBadge(t.urgency)}${badge(t.status)}</div>
+  </div>`;
 }
 
-function renderUsersTable() {
-  elements.usersTableBody.innerHTML = '';
+// ==========================================================================
+// View: Queue (admins) — unassigned / new
+// ==========================================================================
+async function renderQueue() {
+  view().innerHTML = `<div class="page-head"><h2>Queue</h2><p>New & unassigned tickets awaiting dispatch</p></div><div id="queue-list" class="ticket-list">${skeletonRows()}</div>`;
+  try {
+    const all = await api.tickets();
+    const rows = all.filter((t) => !t.assigned_technician_id && !['Closed', 'Cancelled', 'Resolved'].includes(t.status));
+    const box = $('#queue-list');
+    if (!rows.length) { box.innerHTML = emptyBox('inbox', 'Queue is clear', 'No unassigned tickets right now. 🎉'); return; }
+    box.innerHTML = rows.map((t) => `<div class="ticket-row" data-id="${t.id}">
+      <div>${deptTag(t.department)}</div>
+      <div style="min-width:0"><div class="tnum">${esc(t.ticket_number)}</div><div class="ttitle">${esc(t.title)}</div>
+        <div class="tmeta"><span>${esc(t.outlet_code)}</span><span>${esc(t.category)}</span><span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div></div>
+      <div class="tbadges">${urgBadge(t.urgency)}<button class="btn-primary" data-assign="${t.id}" style="padding:7px 12px">Assign</button></div></div>`).join('');
+    $$('.ticket-row', box).forEach((el) => el.addEventListener('click', (e) => { if (e.target.closest('[data-assign]')) return; navigate('/tickets/' + el.dataset.id); }));
+    $$('[data-assign]', box).forEach((b) => b.addEventListener('click', async (e) => { e.stopPropagation(); const t = rows.find((x) => x.id == b.dataset.assign); await openAssignModal(t, () => renderQueue()); }));
+  } catch (e) { $('#queue-list').innerHTML = errBox(e); }
+}
 
-  if (_allUsers.length === 0) {
-    elements.usersEmptyState.style.display = 'flex';
-    // Remove pagination if visible
-    const existing = document.getElementById('users-pagination');
-    if (existing) existing.remove();
-    return;
-  }
+// ==========================================================================
+// View: Ticket detail
+// ==========================================================================
+let detailUploader = null;
+async function renderTicketDetail(id) {
+  view().innerHTML = `<div class="loading-inline">Loading ticket…</div>`;
+  let data;
+  try { data = await api.ticket(id); }
+  catch (e) { view().innerHTML = `<div class="page-head"><a href="/tickets" data-nav class="muted">← Back</a></div>${errBox(e)}`; wireNavLinks(); return; }
+  const { ticket: t, comments, activity, attachments, assignments } = data;
+  const u = state.user;
+  const isDeptAdmin = u.role === 'SuperAdmin' || (u.role === 'AdminIT' && t.department === 'IT') || (u.role === 'AdminME' && t.department === 'ME');
+  const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
+  const canReply = u.role !== 'Leader';
 
-  elements.usersEmptyState.style.display = 'none';
+  // Merge timeline
+  const events = [
+    ...comments.map((c) => ({ t: c.created_at, kind: c.is_system ? 'sys' : 'msg', author: c.author_name, role: c.author_role, text: c.message })),
+    ...activity.map((a) => ({ t: a.created_at, kind: 'sys', author: a.actor_name, role: a.actor_role, text: actionText(a) })),
+  ].sort((a, b) => new Date(a.t) - new Date(b.t));
 
-  const totalPages = Math.ceil(_allUsers.length / USERS_PER_PAGE);
-  _userPage = Math.min(_userPage, totalPages);
-  const start = (_userPage - 1) * USERS_PER_PAGE;
-  const pageUsers = _allUsers.slice(start, start + USERS_PER_PAGE);
-
-  pageUsers.forEach(user => {
-    const row = document.createElement('tr');
-    const roleBadgeClass = user.role === 'Agent' ? 'role-agent' : 'role-customer';
-    const isSelf = state.user && state.user.id === user.id;
-
-    row.innerHTML = `
-      <td>
-        <div class="user-info-cell">
-          <div class="avatar">${user.username.charAt(0).toUpperCase()}</div>
-          <div class="user-details-text">
-            <span class="user-name">${user.username} ${isSelf ? '<span style="font-size:0.75rem; color:var(--color-primary); font-weight:normal;">(You)</span>' : ''}</span>
-            <span class="user-date">Registered ${formatDate(user.created_at)}</span>
-          </div>
+  view().innerHTML = `
+    <div class="page-head"><a href="/tickets" data-nav class="muted">← Back to list</a></div>
+    <div class="detail-top">
+      <div style="flex:1;min-width:0">
+        <div class="tnum">${esc(t.ticket_number || '#' + t.id)} · ${deptTag(t.department)} ${esc(t.category || '')}</div>
+        <h2>${esc(t.title)}</h2>
+        <div class="aging ${agingClass(t)}">Reported ${fmtDate(t.created_at)} · ${timeAgo(t.created_at)}</div>
+      </div>
+      <div class="detail-badges">${urgBadge(t.urgency)}${badge(t.status)}</div>
+    </div>
+    <div class="detail-grid">
+      <div>
+        <div class="card mb">
+          <dl class="info-list">
+            <dt>Outlet</dt><dd>${esc(t.outlet_code || '—')} ${t.brand_code ? '· ' + esc(t.brand_code) : ''}</dd>
+            <dt>Requester</dt><dd>${esc(t.customer_name || '—')}</dd>
+            <dt>Contact</dt><dd>${esc(t.contact_number || '—')}</dd>
+            <dt>Assignee</dt><dd>${esc(t.assignee_name || 'Unassigned')}</dd>
+            ${t.location_detail ? `<dt>Location</dt><dd>${esc(t.location_detail)}</dd>` : ''}
+            ${t.device_equipment ? `<dt>Device</dt><dd>${esc(t.device_equipment)}</dd>` : ''}
+            ${t.business_impact ? `<dt>Impact</dt><dd>${esc(t.business_impact)}</dd>` : ''}
+            ${t.sparepart_note ? `<dt>Sparepart</dt><dd>${esc(t.sparepart_note)}</dd>` : ''}
+            ${t.vendor_note ? `<dt>Vendor</dt><dd>${esc(t.vendor_note)}</dd>` : ''}
+            ${t.expected_part_date ? `<dt>Expected</dt><dd>${esc(t.expected_part_date)}</dd>` : ''}
+            ${t.resolution_note ? `<dt>Resolution</dt><dd>${esc(t.resolution_note)}</dd>` : ''}
+          </dl>
+          <div class="divider"></div>
+          <div class="tl-msg">${esc(t.description || '')}</div>
         </div>
-      </td>
-      <td><span style="font-size: 0.9rem; color: var(--text-secondary);">${user.email}</span></td>
-      <td><span class="role-badge ${roleBadgeClass}">${user.role}</span></td>
-      <td><span style="font-size: 0.9rem; color: var(--text-secondary);">${user.brand || '-'}</span></td>
-      <td style="font-size: 0.8rem; color: var(--text-muted);">${formatDate(user.created_at)}</td>
-      <td style="text-align: right;">
-        <button class="btn-action-icon btn-edit-user" title="Edit user" style="margin-right: 8px;">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-          </svg>
-        </button>
-        <button class="btn-action-icon btn-delete" title="Delete user" ${isSelf ? 'disabled style="opacity: 0.35; cursor: not-allowed;"' : ''}>
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-            <line x1="10" y1="11" x2="10" y2="17"/>
-            <line x1="14" y1="11" x2="14" y2="17"/>
-          </svg>
-        </button>
-      </td>
-    `;
+        ${attachments.length ? `<div class="panel mb"><div class="panel-head"><h3>Evidence & photos</h3></div><div class="card" style="border:none"><div class="tl-atts">${attachments.map(attCard).join('')}</div></div></div>` : ''}
+        <div class="panel"><div class="panel-head"><h3>Activity</h3></div><div class="card" style="border:none">
+          <div class="timeline">${events.length ? events.map(tlItem).join('') : '<p class="muted">No activity yet.</p>'}</div>
+          ${canReply ? replyBoxHTML() : '<p class="muted mt">View-only role.</p>'}
+        </div></div>
+      </div>
+      <div id="action-pane">${actionPaneHTML(t, isDeptAdmin, isAssignedTech)}</div>
+    </div>`;
+  wireNavLinks();
+  if (canReply) wireReply(t);
+  wireActionPane(t, isDeptAdmin, isAssignedTech);
+}
+function actionText(a) { return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action); }
+function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
+function tlItem(e) {
+  if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
+  return `<div class="tl-item"><div class="tl-head"><span class="tl-author">${esc(e.author)}</span><span class="tl-role">${esc(e.role)}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
+}
+function attCard(a) {
+  const isImg = (a.mime_type || '').startsWith('image/');
+  const phaseTag = a.phase && a.phase !== 'general' ? `<span class="phase-tag phase-${esc(a.phase)}">${esc(a.phase)}</span>` : '';
+  if (isImg) return `<a class="att-card" href="${esc(a.file_url)}" target="_blank" style="flex-direction:column;align-items:stretch;width:150px">${phaseTag}<img class="att-thumb" src="${esc(a.file_url)}" alt="${esc(a.file_name)}" loading="lazy"><span class="an">${esc(a.file_name)}</span></a>`;
+  return `<a class="att-card" href="${esc(a.file_url)}" target="_blank">${svg('<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>', 16)}${phaseTag}<span class="an">${esc(a.file_name)}</span></a>`;
+}
+function replyBoxHTML() {
+  return `<div class="reply-box">
+    <textarea id="reply-msg" placeholder="Write an update or reply…"></textarea>
+    ${uploadZoneHTML('reply-up')}
+    <div class="reply-tools">
+      <select id="reply-phase"><option value="general">General</option><option value="before">Before repair</option><option value="after">After repair</option></select>
+      <button class="btn-primary right" id="reply-send">Send</button>
+    </div></div>`;
+}
+function wireReply(t) {
+  detailUploader = new Uploader($('#reply-up'), $('#reply-up-list'));
+  const btn = $('#reply-send');
+  btn.addEventListener('click', async () => {
+    const msg = $('#reply-msg').value.trim();
+    const ids = detailUploader.ids();
+    if (!msg && !ids.length) { toast('Write a message or add a photo', 'error'); return; }
+    if (detailUploader.uploading()) { toast('Wait for uploads to finish', 'error'); return; }
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      await api.comment(t.id, { message: msg, attachmentIds: ids, phase: $('#reply-phase').value });
+      toast('Reply posted', 'success');
+      renderTicketDetail(t.id);
+    } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Send'; }
+  });
+}
+function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
+  if (!isDeptAdmin && !isAssignedTech) return `<div class="card"><h3 style="font-size:.95rem;margin-bottom:6px">Status</h3>${badge(t.status)}<p class="muted mt" style="font-size:.8rem">You’ll be notified of updates here.</p></div>`;
+  let html = `<div class="card"><h3 style="font-size:.95rem;margin-bottom:12px">Actions</h3>`;
+  // Assignment (admin)
+  if (isDeptAdmin) {
+    html += `<div class="field"><label>Assignment</label><div class="row"><div style="flex:1">${esc(t.assignee_name || 'Unassigned')}</div><button class="btn-outline" id="btn-assign" style="padding:7px 12px">${t.assigned_technician_id ? 'Reassign' : 'Assign'}</button></div></div>`;
+  }
+  // Status controls
+  const opts = isDeptAdmin ? STATUSES : TECH_STATUSES;
+  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
+  if (isDeptAdmin) {
+    html += `<div class="field"><label>Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
+  }
+  html += `<button class="btn-primary btn-block" id="act-apply">Apply</button>`;
+  if (isDeptAdmin) html += `<button class="btn-ghost btn-block mt" id="act-advanced">Re-route dept / category</button>`;
+  html += `</div>`;
+  return html;
+}
+function wireActionPane(t, isDeptAdmin, isAssignedTech) {
+  if (!isDeptAdmin && !isAssignedTech) return;
+  const assignBtn = $('#btn-assign'); if (assignBtn) assignBtn.addEventListener('click', () => openAssignModal(t, () => renderTicketDetail(t.id)));
+  const apply = $('#act-apply');
+  apply.addEventListener('click', async () => {
+    const newStatus = $('#act-status').value;
+    const patch = {};
+    if (isDeptAdmin && $('#act-urg') && $('#act-urg').value !== t.urgency) patch.urgency = $('#act-urg').value;
+    // Collect required extras for certain transitions
+    const extra = await collectStatusExtras(t, newStatus);
+    if (extra === null && newStatus !== t.status) return; // cancelled dialog
+    Object.assign(patch, extra || {});
+    if (newStatus !== t.status) patch.status = newStatus;
+    if (!Object.keys(patch).length) { toast('No changes', 'info'); return; }
+    apply.disabled = true; apply.textContent = 'Applying…';
+    try { await api.patchTicket(t.id, patch); toast('Ticket updated', 'success'); renderTicketDetail(t.id); }
+    catch (e) { toast(e.message, 'error'); apply.disabled = false; apply.textContent = 'Apply'; }
+  });
+  const adv = $('#act-advanced'); if (adv) adv.addEventListener('click', () => openRerouteModal(t));
+}
+async function collectStatusExtras(t, newStatus) {
+  if (newStatus === t.status) return {};
+  if (newStatus === 'Resolved' || newStatus === 'Closed') {
+    if (t.resolution_note && newStatus === 'Closed') return {};
+    const v = await formModal(newStatus === 'Resolved' ? 'Mark Resolved' : 'Close ticket',
+      [{ name: 'resolution_note', label: 'Resolution note (what was done)', type: 'textarea', required: true, value: t.resolution_note || '' }], newStatus);
+    return v;
+  }
+  if (newStatus === 'Cancelled') {
+    return await formModal('Cancel ticket', [{ name: 'cancel_reason', label: 'Reason for cancellation', type: 'textarea', required: true }], 'Cancel ticket');
+  }
+  if (newStatus === 'Waiting Sparepart') {
+    return await formModal('Waiting for sparepart', [
+      { name: 'sparepart_note', label: 'Sparepart needed', type: 'text' },
+      { name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' },
+    ], 'Set status');
+  }
+  if (newStatus === 'Waiting Vendor') {
+    return await formModal('Waiting for vendor', [
+      { name: 'vendor_note', label: 'Vendor / detail', type: 'text' },
+      { name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' },
+    ], 'Set status');
+  }
+  if (t.status === 'Closed') {
+    return await formModal('Reopen ticket', [{ name: 'reason', label: 'Reason for reopening', type: 'textarea', required: true }], 'Reopen');
+  }
+  return {};
+}
+async function openRerouteModal(t) {
+  const other = t.department === 'IT' ? 'ME' : 'IT';
+  let cats = [];
+  const v = await formModal('Re-route / edit', [
+    { name: 'department', label: 'Department', type: 'select', value: t.department, options: [{ value: 'IT', label: 'IT' }, { value: 'ME', label: 'ME (Mechanical)' }] },
+    { name: 'category', label: 'Category (must match dept)', type: 'text', value: t.category, hint: `Switching to ${other} is an escalation; the ticket number stays the same.` },
+  ], 'Save');
+  if (!v) return;
+  const patch = {};
+  if (v.department !== t.department) patch.department = v.department;
+  if (v.category && v.category !== t.category) patch.category = v.category;
+  if (!Object.keys(patch).length) return;
+  try { await api.patchTicket(t.id, patch); toast('Ticket re-routed', 'success'); renderTicketDetail(t.id); }
+  catch (e) { toast(e.message, 'error'); }
+}
 
-    row.querySelector('.btn-edit-user').addEventListener('click', (e) => {
-      e.stopPropagation();
-      openUserModal(user);
+// Assignment modal with recommendation
+async function openAssignModal(t, after) {
+  const { overlay, close } = openModal({
+    title: 'Assign technician — ' + (t.ticket_number || '#' + t.id),
+    bodyHTML: `<div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
+      <div class="divider"></div>
+      <div class="field"><label>Manual override</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+      <label class="row gap-sm" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign selected</button>`,
+    size: 'lg',
+    async onMount(ov) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      try {
+        const [recs, techs] = await Promise.all([api.recommend(t.id), api.technicians(t.department)]);
+        const rb = $('#rec-box', ov);
+        rb.innerHTML = recs.length ? recs.map((r, i) => `
+          <div class="rec-item ${i === 0 && r.available ? 'best' : ''}">
+            <div class="rec-info"><div class="rec-name">${esc(r.username)} ${i === 0 && r.available ? '⭐' : ''}</div><div class="rec-reasons">${esc(r.reasons.join(' · '))}</div></div>
+            <span class="rec-avail ${r.available ? 'yes' : 'no'}">${r.available ? 'available' : 'busy'}</span>
+            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign</button>
+          </div>`).join('') : '<p class="muted">No technicians configured for this department.</p>';
+        $('#manual-tech', ov).innerHTML = '<option value="">Choose technician…</option>' + techs.map((x) => `<option value="${x.id}">${esc(x.username)} (${x.workload} open)</option>`).join('');
+        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, false, close, after)));
+      } catch (e) { $('#rec-box', ov).innerHTML = errBox(e); }
+      $('[data-manual]', ov).addEventListener('click', () => {
+        const id = $('#manual-tech', ov).value; if (!id) { toast('Pick a technician', 'error'); return; }
+        doAssign(t, id, $('#ov-check', ov).checked, close, after);
+      });
+    },
+  });
+}
+async function doAssign(t, techId, override, close, after) {
+  try {
+    await api.assign(t.id, { technician_id: Number(techId), override });
+    toast('Technician assigned', 'success'); close(); if (after) after();
+  } catch (e) {
+    if (/override/i.test(e.message)) toast(e.message + ' Tick the override box to force.', 'error');
+    else toast(e.message, 'error');
+  }
+}
+
+// ==========================================================================
+// View: Schedules
+// ==========================================================================
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+async function renderSchedules() {
+  const dept = state.user.role === 'AdminIT' ? 'IT' : state.user.role === 'AdminME' ? 'ME' : '';
+  view().innerHTML = `<div class="page-head"><h2>Technician schedules</h2><p>Availability drives assignment recommendations</p></div>
+    <div class="toolbar">${!dept ? `<select id="sch-dept"><option value="">All</option><option>IT</option><option>ME</option></select>` : ''}</div>
+    <div id="tech-list">${skeletonRows()}</div>`;
+  const load = async (d) => {
+    try {
+      const techs = await api.technicians(d || undefined);
+      const box = $('#tech-list');
+      if (!techs.length) { box.innerHTML = emptyBox('users', 'No technicians', 'Add technician users first.'); return; }
+      box.innerHTML = techs.map((t) => `<div class="panel mb"><div class="panel-head"><h3>${esc(t.username)} ${deptTag(t.department || (t.role === 'TechnicianIT' ? 'IT' : 'ME'))}</h3><span class="muted">${t.workload} open</span></div><div class="card" style="border:none" id="sch-${t.id}"><div class="loading-inline">Loading…</div></div></div>`).join('');
+      for (const t of techs) loadTechSchedule(t);
+    } catch (e) { $('#tech-list').innerHTML = errBox(e); }
+  };
+  if (!dept) $('#sch-dept').addEventListener('change', (e) => load(e.target.value));
+  load(dept);
+}
+async function loadTechSchedule(t) {
+  const box = $('#sch-' + t.id); if (!box) return;
+  try {
+    const { schedules, unavailability } = await api.schedules(t.id);
+    box.innerHTML = `
+      <div class="chips mb">${schedules.length ? schedules.map((s) => `<span class="chip">${DOW[s.day_of_week]} ${s.start_time}–${s.end_time} <button data-del="${s.id}" class="pc-retry" style="color:var(--danger)">✕</button></span>`).join('') : '<span class="muted">No working hours set</span>'}</div>
+      ${unavailability.length ? `<div class="mb"><strong style="font-size:.8rem">Unavailable:</strong> ${unavailability.map((u) => `<span class="chip">${fmtDate(u.start_datetime)} → ${fmtDate(u.end_datetime)}${u.reason ? ' · ' + esc(u.reason) : ''}</span>`).join(' ')}</div>` : ''}
+      <div class="row wrap gap-sm"><button class="btn-outline" data-add="${t.id}" style="padding:7px 12px">+ Working hours</button><button class="btn-outline" data-off="${t.id}" style="padding:7px 12px">+ Day off / block</button></div>`;
+    $$('[data-del]', box).forEach((b) => b.addEventListener('click', async () => {
+      try { await api.delSchedule(t.id, b.dataset.del); toast('Working hours removed', 'success'); loadTechSchedule(t); }
+      catch (e) { toast(e.message, 'error'); }
+    }));
+    $('[data-add]', box).addEventListener('click', async () => {
+      const v = await formModal('Add working hours', [
+        { name: 'day_of_week', label: 'Day', type: 'select', value: '1', options: DOW.map((d, i) => ({ value: String(i), label: d })) },
+        { name: 'start_time', label: 'Start (HH:MM)', type: 'time', value: '09:00', required: true },
+        { name: 'end_time', label: 'End (HH:MM)', type: 'time', value: '18:00', required: true },
+      ], 'Add');
+      if (!v) return;
+      try { await api.addSchedule(t.id, { day_of_week: Number(v.day_of_week), start_time: v.start_time, end_time: v.end_time }); toast('Working hours added', 'success'); loadTechSchedule(t); }
+      catch (e) { toast(e.message, 'error'); }
     });
+    $('[data-off]', box).addEventListener('click', async () => {
+      const v = await formModal('Add unavailability', [
+        { name: 'start_datetime', label: 'From', type: 'datetime-local', required: true },
+        { name: 'end_datetime', label: 'To', type: 'datetime-local', required: true },
+        { name: 'reason', label: 'Reason', type: 'text' },
+      ], 'Add');
+      if (!v) return;
+      try { await api.addUnavail(t.id, v); toast('Unavailability saved', 'success'); loadTechSchedule(t); } catch (e) { toast(e.message, 'error'); }
+    });
+  } catch (e) { box.innerHTML = errBox(e); }
+}
 
-    if (!isSelf) {
-      const deleteBtn = row.querySelector('.btn-delete');
-      let deleteConfirmPending = false;
-      let deleteCancelTimer = null;
+// ==========================================================================
+// View: Reports
+// ==========================================================================
+async function renderReports() {
+  const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
+  let brands = [];
+  try { brands = await api.brands(); } catch (_) {}
+  view().innerHTML = `<div class="page-head"><h2>Reports</h2><p>Server-side, permission-scoped</p></div>
+    <div class="card mb">
+      <div class="field-row">
+        ${showDept ? `<div class="field"><label>Department</label><select id="r-dept"><option value="">All</option><option>IT</option><option>ME</option></select></div>` : ''}
+        <div class="field"><label>Brand</label><select id="r-brand"><option value="">All</option>${brands.map((b) => `<option>${esc(b.code)}</option>`).join('')}</select></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Status</label><select id="r-status"><option value="">All</option>${STATUSES.map((s) => `<option>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Urgency</label><select id="r-urg"><option value="">All</option>${URGENCIES.map((s) => `<option>${s}</option>`).join('')}</select></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>From</label><input type="date" id="r-from"></div>
+        <div class="field"><label>To</label><input type="date" id="r-to"></div>
+      </div>
+      <div class="row wrap gap-sm">
+        <button class="btn-primary" id="r-run">Generate</button>
+        <button class="btn-outline" id="r-csv">Export CSV</button>
+        <button class="btn-outline" id="r-print">Print</button>
+      </div>
+    </div>
+    <div id="r-result"></div>`;
+  const params = () => {
+    const q = new URLSearchParams();
+    if (showDept && $('#r-dept').value) q.append('department', $('#r-dept').value);
+    if ($('#r-brand').value) q.append('brand', $('#r-brand').value);
+    if ($('#r-status').value) q.append('status', $('#r-status').value);
+    if ($('#r-urg').value) q.append('urgency', $('#r-urg').value);
+    if ($('#r-from').value) q.append('start_date', $('#r-from').value);
+    if ($('#r-to').value) q.append('end_date', $('#r-to').value);
+    return q;
+  };
+  $('#r-run').addEventListener('click', async () => {
+    const q = params();
+    if ($('#r-from').value && $('#r-to').value && $('#r-from').value > $('#r-to').value) { toast('Start date is after end date', 'error'); return; }
+    $('#r-result').innerHTML = `<div class="loading-inline">Running report…</div>`;
+    try {
+      const rows = await api.report(q.toString());
+      $('#r-result').innerHTML = rows.length ? reportTable(rows) : emptyBox('chart', 'No matching tickets', 'Adjust filters and try again.');
+      toast(rows.length ? `Report ready — ${rows.length} ticket(s)` : 'No matching tickets', rows.length ? 'success' : 'info');
+    } catch (e) { $('#r-result').innerHTML = errBox(e); toast(e.message, 'error'); }
+  });
+  $('#r-csv').addEventListener('click', () => { window.open('/api/reports/export?' + params().toString(), '_blank'); toast('Preparing CSV export…', 'info'); });
+  $('#r-print').addEventListener('click', () => window.print());
+}
+function reportTable(rows) {
+  return `<div class="panel"><div class="panel-head"><h3>${rows.length} ticket(s)</h3></div><div class="table-wrap"><table class="data">
+    <thead><tr><th>Ticket</th><th>Dept</th><th>Category</th><th>Outlet</th><th>Status</th><th>Urgency</th><th>Assignee</th><th>Created</th></tr></thead>
+    <tbody>${rows.map((t) => `<tr><td class="nowrap">${esc(t.ticket_number)}</td><td>${deptTag(t.department)}</td><td>${esc(t.category || '')}</td><td>${esc(t.outlet_display || t.outlet_code || '')}</td><td>${badge(t.status)}</td><td>${urgBadge(t.urgency)}</td><td>${esc(t.assignee_name || '')}</td><td class="nowrap">${fmtDate(t.created_at)}</td></tr>`).join('')}</tbody>
+  </table></div></div>`;
+}
 
-      deleteBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
+// ==========================================================================
+// View: Users (SuperAdmin)
+// ==========================================================================
+async function renderUsers() {
+  view().innerHTML = `<div class="page-head"><h2>Users</h2><p>Manage staff, roles & access</p></div>
+    <div class="toolbar"><div class="search"><input id="u-search" placeholder="Search name / email…"></div><button class="btn-primary" id="u-add">+ Add user</button></div>
+    <div class="panel"><div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Dept</th><th>Access</th><th>Status</th><th></th></tr></thead><tbody id="u-body"><tr><td colspan="7" class="loading-inline">Loading…</td></tr></tbody></table></div></div>`;
+  let all = [];
+  const draw = (term = '') => {
+    const rows = all.filter((u) => !term || u.username.toLowerCase().includes(term) || u.email.toLowerCase().includes(term));
+    $('#u-body').innerHTML = rows.length ? rows.map(userRow).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">No users</td></tr>';
+    $$('[data-edit]').forEach((b) => b.addEventListener('click', () => openUserModal(all.find((x) => x.id == b.dataset.edit), reload)));
+    $$('[data-del]').forEach((b) => b.addEventListener('click', () => confirmDeleteUser(all.find((x) => x.id == b.dataset.del), reload)));
+  };
+  const reload = async () => { all = await api.users(); draw($('#u-search').value.trim().toLowerCase()); };
+  $('#u-add').addEventListener('click', () => openUserModal(null, reload));
+  $('#u-search').addEventListener('input', debounce((e) => draw(e.target.value.trim().toLowerCase()), 200));
+  try { await reload(); } catch (e) { $('#u-body').innerHTML = `<tr><td colspan="7">${errBox(e)}</td></tr>`; }
+}
+function userRow(u) {
+  const self = state.user.id === u.id;
+  const access = u.all_brands ? 'All brands' : (u.brand || '—');
+  return `<tr>
+    <td><strong>${esc(u.username)}</strong> ${self ? '<span class="muted">(you)</span>' : ''}</td>
+    <td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.department || '—')}</td>
+    <td>${esc(access)}</td>
+    <td>${u.is_active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>'}</td>
+    <td class="nowrap"><button class="btn-ghost" data-edit="${u.id}" style="padding:6px 8px">Edit</button>${self ? '' : `<button class="btn-ghost" data-del="${u.id}" style="padding:6px 8px;color:var(--danger)">Del</button>`}</td>
+  </tr>`;
+}
+const ALL_ROLES = ['Requestor', 'TechnicianIT', 'TechnicianME', 'AdminIT', 'AdminME', 'Leader', 'SuperAdmin'];
+async function openUserModal(u, after) {
+  const isEdit = !!u;
+  const v = await formModal(isEdit ? 'Edit user' : 'Add user', [
+    { name: 'username', label: 'Full name', required: !isEdit, value: u ? u.username : '' },
+    { name: 'email', label: 'Email', type: 'email', required: !isEdit, value: u ? u.email : '' },
+    { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: ALL_ROLES.map((r) => ({ value: r, label: r })) },
+    { name: 'brand', label: 'Brand (blank = none)', value: u ? (u.brand || '') : '' },
+    { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
+    { name: 'can_close_override', label: '', type: 'checkbox', checkboxLabel: 'Technician may close tickets', value: u ? !!u.can_close_override : false },
+    { name: 'is_active', label: '', type: 'checkbox', checkboxLabel: 'Active', value: u ? !!u.is_active : true },
+    { name: 'password', label: isEdit ? 'New password (blank = keep)' : 'Password', type: 'password', required: !isEdit, hint: 'Min 10 chars, upper/lower/number/special' },
+  ], isEdit ? 'Save' : 'Create');
+  if (!v) return;
+  const payload = { username: v.username, email: v.email, role: v.role, brand: v.brand || null, all_brands: v.all_brands, can_close_override: v.can_close_override, is_active: v.is_active };
+  if (v.password) payload.password = v.password;
+  try {
+    if (isEdit) await api.patchUser(u.id, payload); else await api.createUser(payload);
+    toast(isEdit ? 'User updated' : 'User created', 'success'); after();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function confirmDeleteUser(u, after) {
+  const v = await formModal('Delete ' + u.username + '?', [{ name: 'c', label: '', type: 'checkbox', checkboxLabel: 'Yes, permanently delete this user', value: false }], 'Delete');
+  if (!v || !v.c) return;
+  try { await api.delUser(u.id); toast('User deleted', 'success'); after(); } catch (e) { toast(e.message, 'error'); }
+}
 
-        if (!deleteConfirmPending) {
-          // First click: show confirm state
-          deleteConfirmPending = true;
-          deleteBtn.style.background = '#ef4444';
-          deleteBtn.style.color = '#fff';
-          deleteBtn.style.borderRadius = '6px';
-          deleteBtn.title = 'Click again to confirm delete';
-          deleteBtn.innerHTML = '<span style="font-size:0.7rem;font-weight:600;padding:0 4px;">Confirm?</span>';
-
-          // Auto-cancel after 3 seconds
-          deleteCancelTimer = setTimeout(() => {
-            deleteConfirmPending = false;
-            deleteBtn.style.background = '';
-            deleteBtn.style.color = '';
-            deleteBtn.style.borderRadius = '';
-            deleteBtn.title = 'Delete user';
-            deleteBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-              <line x1="10" y1="11" x2="10" y2="17"/>
-              <line x1="14" y1="11" x2="14" y2="17"/>
-            </svg>`;
-          }, 3000);
-
-        } else {
-          // Second click: confirmed — execute delete
-          clearTimeout(deleteCancelTimer);
-          deleteConfirmPending = false;
-          deleteBtn.disabled = true;
-          deleteBtn.style.opacity = '0.4';
-          deleteBtn.innerHTML = '<span style="font-size:0.7rem;padding:0 4px;">...</span>';
-
-          try {
-            await api.deleteUser(user.id);
-            showToast(`"${user.username}" deleted successfully`, 'success');
-            _allUsers = _allUsers.filter(u => u.id !== user.id);
-            renderUsersTable();
-          } catch (err) {
-            console.error('Delete error:', err);
-            showToast(err.message || 'Error deleting user', 'error');
-            deleteBtn.disabled = false;
-            deleteBtn.style.opacity = '';
-            deleteBtn.style.background = '';
-            deleteBtn.style.color = '';
-            deleteBtn.title = 'Delete user';
-            deleteBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-              <line x1="10" y1="11" x2="10" y2="17"/>
-              <line x1="14" y1="11" x2="14" y2="17"/>
-            </svg>`;
-          }
+// ==========================================================================
+// Quick / detailed report modal
+// ==========================================================================
+let quickUploader = null;
+async function openReportModal() {
+  const outlets = await loadOutlets().catch(() => []);
+  const brandsGroups = {};
+  outlets.forEach((o) => { (brandsGroups[o.brand_code] = brandsGroups[o.brand_code] || []).push(o); });
+  const lastOutlet = localStorage.getItem('lastOutlet') || '';
+  const optgroups = Object.entries(brandsGroups).map(([b, list]) => `<optgroup label="${esc(b)}">${list.map((o) => `<option value="${esc(o.code)}" ${o.code === lastOutlet ? 'selected' : ''}>${esc(o.code)}</option>`).join('')}</optgroup>`).join('');
+  const isAdmin = ADMIN_ROLES.includes(state.user.role);
+  const body = `
+    <div class="field"><label>Outlet <span class="req-star">*</span></label><select id="q-outlet"><option value="">Select outlet…</option>${optgroups}</select></div>
+    <div class="field"><label>Department <span class="req-star">*</span></label>
+      <div class="segmented"><button type="button" class="seg-btn big" data-dept="IT">🖥️ IT</button><button type="button" class="seg-btn big" data-dept="ME">🔧 Mechanical</button></div></div>
+    <div class="field"><label>Category <span class="req-star">*</span></label><select id="q-cat" disabled><option>Select department first</option></select></div>
+    <div class="field"><label>What’s the issue? <span class="req-star">*</span></label><textarea id="q-desc" placeholder="e.g. POS terminal 2 not printing receipts"></textarea></div>
+    <div class="field"><label>Urgency</label><div class="segmented" id="q-urg">${URGENCIES.map((u) => `<button type="button" class="seg-btn ${u === 'Medium' ? 'active' : ''}" data-urg="${u}">${u}</button>`).join('')}</div></div>
+    <div class="field"><label>Contact / WhatsApp</label><input id="q-contact" placeholder="08xx…" inputmode="tel"></div>
+    ${isAdmin ? `<div class="field"><label>Report on behalf of (optional)</label><div class="field-row"><input id="q-cname" placeholder="Name"><input id="q-cemail" placeholder="Email" type="email"></div></div>` : ''}
+    <button type="button" class="btn-ghost" id="q-more">▾ Add more details (optional)</button>
+    <div id="q-extra" hidden>
+      <div class="field"><label>Subject (optional)</label><input id="q-title" placeholder="Short subject line"></div>
+      <div class="field-row"><div class="field"><label>Location in outlet</label><input id="q-loc"></div><div class="field"><label>Device / equipment</label><input id="q-dev"></div></div>
+      <div class="field"><label>Business impact</label><input id="q-impact" placeholder="e.g. cannot take payments"></div>
+      <div class="field-row"><div class="field"><label>When it happened</label><input type="datetime-local" id="q-occ"></div><div class="field"><label>Preferred visit time</label><input id="q-visit" placeholder="e.g. after 2pm"></div></div>
+    </div>
+    <div class="field mt"><label>Photos / video (optional)</label>${uploadZoneHTML('q-up')}</div>`;
+  const foot = `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" id="q-submit">Submit report</button>`;
+  const { overlay, close } = openModal({
+    title: 'Report an issue', bodyHTML: body, footHTML: foot, size: 'lg',
+    onMount(ov) {
+      quickUploader = new Uploader($('#q-up', ov), $('#q-up-list', ov));
+      let dept = '';
+      $$('[data-dept]', ov).forEach((b) => b.addEventListener('click', async () => {
+        dept = b.dataset.dept;
+        $$('[data-dept]', ov).forEach((x) => x.classList.toggle('active', x === b));
+        const sel = $('#q-cat', ov); sel.disabled = true; sel.innerHTML = '<option>Loading…</option>';
+        try { const cats = await api.categories(dept); sel.innerHTML = '<option value="">Select category…</option>' + cats.map((c) => `<option>${esc(c.name)}</option>`).join(''); sel.disabled = false; }
+        catch (e) { sel.innerHTML = '<option>Failed to load</option>'; }
+      }));
+      let urg = 'Medium';
+      $$('[data-urg]', ov).forEach((b) => b.addEventListener('click', () => { urg = b.dataset.urg; $$('[data-urg]', ov).forEach((x) => x.classList.toggle('active', x === b)); }));
+      $('#q-more', ov).addEventListener('click', () => { const e = $('#q-extra', ov); e.hidden = !e.hidden; $('#q-more', ov).textContent = (e.hidden ? '▾ Add more details (optional)' : '▴ Hide extra details'); });
+      $('[data-cancel]', ov).addEventListener('click', close);
+      const submit = $('#q-submit', ov);
+      submit.addEventListener('click', async () => {
+        const outlet = $('#q-outlet', ov).value, cat = $('#q-cat', ov).value, desc = $('#q-desc', ov).value.trim();
+        if (!outlet) return toast('Select an outlet', 'error');
+        if (!dept) return toast('Choose IT or Mechanical', 'error');
+        if (!cat) return toast('Select a category', 'error');
+        if (!desc) return toast('Describe the issue', 'error');
+        if (quickUploader.uploading()) return toast('Wait for uploads to finish', 'error');
+        submit.disabled = true; submit.textContent = 'Submitting…';
+        const payload = {
+          department: dept, outlet_code: outlet, category: cat, description: desc, urgency: urg,
+          contact_number: $('#q-contact', ov).value.trim(), report_mode: $('#q-extra', ov).hidden ? 'quick' : 'detailed',
+          attachmentIds: quickUploader.ids(),
+          title: ($('#q-title', ov) && $('#q-title', ov).value.trim()) || '',
+          location_detail: $('#q-loc', ov) ? $('#q-loc', ov).value.trim() : '',
+          device_equipment: $('#q-dev', ov) ? $('#q-dev', ov).value.trim() : '',
+          business_impact: $('#q-impact', ov) ? $('#q-impact', ov).value.trim() : '',
+          occurrence_at: $('#q-occ', ov) ? $('#q-occ', ov).value : '',
+          preferred_visit_time: $('#q-visit', ov) ? $('#q-visit', ov).value.trim() : '',
+        };
+        if (isAdmin) { payload.customer_name = $('#q-cname', ov).value.trim(); payload.customer_email = $('#q-cemail', ov).value.trim(); }
+        try {
+          const t = await api.createTicket(payload);
+          localStorage.setItem('lastOutlet', outlet);
+          toast('Ticket ' + t.ticket_number + ' created', 'success');
+          close(); navigate('/tickets/' + t.id);
+        } catch (e) {
+          if (e.status === 409) toast('Looks like you just sent this — check your list.', 'error');
+          else toast(e.message, 'error');
+          submit.disabled = false; submit.textContent = 'Submit report';
         }
       });
-    }
-
-    elements.usersTableBody.appendChild(row);
-  });
-
-  // Render pagination
-  renderUsersPagination(totalPages);
-}
-
-function renderUsersPagination(totalPages) {
-  // Remove old pagination
-  const existing = document.getElementById('users-pagination');
-  if (existing) existing.remove();
-
-  if (totalPages <= 1) return;
-
-  const wrapper = document.getElementById('users-table-wrapper');
-  if (!wrapper) return;
-
-  const nav = document.createElement('div');
-  nav.id = 'users-pagination';
-  nav.className = 'users-pagination';
-
-  const info = document.createElement('span');
-  info.className = 'pagination-info';
-  const start = (_userPage - 1) * USERS_PER_PAGE + 1;
-  const end = Math.min(_userPage * USERS_PER_PAGE, _allUsers.length);
-  info.textContent = `${start}–${end} of ${_allUsers.length} users`;
-
-  const controls = document.createElement('div');
-  controls.className = 'pagination-controls';
-
-  // Prev button
-  const prevBtn = document.createElement('button');
-  prevBtn.className = 'pagination-btn';
-  prevBtn.innerHTML = '&#8592; Prev';
-  prevBtn.disabled = _userPage === 1;
-  prevBtn.addEventListener('click', () => { _userPage--; renderUsersTable(); });
-
-  // Page numbers
-  const pageNums = document.createElement('div');
-  pageNums.className = 'pagination-pages';
-  const maxVisible = 5;
-  let pStart = Math.max(1, _userPage - Math.floor(maxVisible / 2));
-  let pEnd = Math.min(totalPages, pStart + maxVisible - 1);
-  if (pEnd - pStart + 1 < maxVisible) pStart = Math.max(1, pEnd - maxVisible + 1);
-
-  for (let p = pStart; p <= pEnd; p++) {
-    const btn = document.createElement('button');
-    btn.className = `pagination-page-btn${p === _userPage ? ' active' : ''}`;
-    btn.textContent = p;
-    btn.addEventListener('click', () => { _userPage = p; renderUsersTable(); });
-    pageNums.appendChild(btn);
-  }
-
-  // Next button
-  const nextBtn = document.createElement('button');
-  nextBtn.className = 'pagination-btn';
-  nextBtn.innerHTML = 'Next &#8594;';
-  nextBtn.disabled = _userPage === totalPages;
-  nextBtn.addEventListener('click', () => { _userPage++; renderUsersTable(); });
-
-  controls.appendChild(prevBtn);
-  controls.appendChild(pageNums);
-  controls.appendChild(nextBtn);
-
-  nav.appendChild(info);
-  nav.appendChild(controls);
-  wrapper.appendChild(nav);
-}
-
-// --- Reports View Functions ---
-
-let _reportTickets = [];
-
-async function loadReportsData() {
-  if (!elements.reportCustomer || !elements.reportAgent) return;
-
-  // Clear previous results
-  elements.reportTableBody.innerHTML = '';
-  elements.reportResultsContainer.style.display = 'none';
-
-  try {
-    // 1. Fetch all users to populate filter dropdowns
-    const users = await api.getUsers();
-    
-    // Populate customers select
-    elements.reportCustomer.innerHTML = '<option value="">All Customers</option>';
-    const customers = users.filter(u => u.role === 'Customer');
-    customers.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.email;
-      opt.textContent = `${c.username} (${c.email})`;
-      elements.reportCustomer.appendChild(opt);
-    });
-
-    // Populate agents select
-    elements.reportAgent.innerHTML = '<option value="">All Agents</option>';
-    const agents = users.filter(u => u.role === 'Agent');
-    agents.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a.username;
-      opt.textContent = a.username;
-      elements.reportAgent.appendChild(opt);
-    });
-
-  } catch (err) {
-    console.error('Error loading reports filters:', err);
-    showToast('Failed to load reports filters', 'error');
-  }
-}
-
-async function handleGenerateReport() {
-  const status = elements.reportStatus.value;
-  const startDateVal = elements.reportStartDate.value;
-  const endDateVal = elements.reportEndDate.value;
-  const customerEmail = elements.reportCustomer.value;
-  const agentName = elements.reportAgent.value;
-
-  elements.reportTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 24px; color: var(--text-muted);">Generating report...</td></tr>';
-  elements.reportEmptyState.style.display = 'none';
-  elements.reportResultsContainer.style.display = 'block';
-
-  try {
-    // Fetch all tickets
-    const tickets = await api.getTickets();
-
-    // Filter tickets locally
-    _reportTickets = tickets.filter(t => {
-      // 1. Status check
-      if (status && t.status !== status) return false;
-
-      // 2. Date checks
-      const ticketDate = new Date(t.created_at);
-      if (startDateVal) {
-        const start = new Date(startDateVal);
-        start.setHours(0, 0, 0, 0);
-        if (ticketDate < start) return false;
-      }
-      if (endDateVal) {
-        const end = new Date(endDateVal);
-        end.setHours(23, 59, 59, 999);
-        if (ticketDate > end) return false;
-      }
-
-      // 3. Customer check
-      if (customerEmail && t.customer_email !== customerEmail) return false;
-
-      // 4. Agent check
-      if (agentName) {
-        if (!t.assignee_name || !t.assignee_name.toLowerCase().includes(agentName.toLowerCase())) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-
-    renderReportTable();
-
-  } catch (err) {
-    console.error('Error generating report:', err);
-    showToast('Failed to generate report', 'error');
-    elements.reportTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 24px; color: var(--priority-urgent);">Error loading reports.</td></tr>';
-  }
-}
-
-function renderReportTable() {
-  elements.reportTableBody.innerHTML = '';
-
-  if (_reportTickets.length === 0) {
-    elements.reportEmptyState.style.display = 'flex';
-    return;
-  }
-
-  elements.reportEmptyState.style.display = 'none';
-
-  _reportTickets.forEach(t => {
-    const row = document.createElement('tr');
-    
-    let statusClass = 'status-new';
-    if (t.status === 'Open') statusClass = 'status-open';
-    else if (t.status === 'Pending') statusClass = 'status-pending';
-    else if (t.status === 'Solved') statusClass = 'status-solved';
-    else if (t.status === 'Closed') statusClass = 'status-closed';
-
-    let priorityClass = 'priority-low';
-    if (t.priority === 'Medium') priorityClass = 'priority-medium';
-    else if (t.priority === 'High') priorityClass = 'priority-high';
-    else if (t.priority === 'Urgent') priorityClass = 'priority-urgent';
-
-    row.innerHTML = `
-      <td style="font-weight: 600; color: var(--color-primary);">#${t.id}</td>
-      <td>
-        <span class="ticket-subject" style="font-weight: 500; color: var(--text-primary);">${t.title}</span>
-      </td>
-      <td><span class="status-badge ${statusClass}">${t.status}</span></td>
-      <td><span class="priority-tag ${priorityClass}">${t.priority}</span></td>
-      <td>
-        <div style="display: flex; flex-direction: column;">
-          <span style="font-weight: 500; color: var(--text-primary);">${t.customer_name}</span>
-          <span style="font-size: 0.75rem; color: var(--text-muted);">${t.customer_email}</span>
-        </div>
-      </td>
-      <td><span style="font-size: 0.9rem; color: var(--text-secondary);">${t.assignee_name || 'Unassigned'}</span></td>
-      <td style="font-size: 0.8rem; color: var(--text-muted);">${formatDate(t.created_at)}</td>
-    `;
-    elements.reportTableBody.appendChild(row);
+    },
   });
 }
 
-function handleResetReportFilters() {
-  elements.reportStatus.value = '';
-  elements.reportStartDate.value = '';
-  elements.reportEndDate.value = '';
-  elements.reportCustomer.value = '';
-  elements.reportAgent.value = '';
-  elements.reportTableBody.innerHTML = '';
-  elements.reportResultsContainer.style.display = 'none';
-  elements.reportEmptyState.style.display = 'none';
+// ==========================================================================
+// Shared UI bits
+// ==========================================================================
+function emptyBox(icon, title, sub) { return `<div class="empty">${svg(ICONS[icon] || ICONS.ticket, 46)}<h3>${esc(title)}</h3><p>${esc(sub)}</p></div>`; }
+function errBox(e) { return `<div class="empty"><h3>Something went wrong</h3><p>${esc(e.message || 'Please try again')}</p></div>`; }
+function skeletonRows() { return Array(4).fill('<div class="skeleton"></div>').join(''); }
+function wireNavLinks() { $$('[data-nav]').forEach((a) => { if (a._wired) return; a._wired = true; a.addEventListener('click', (e) => { e.preventDefault(); navigate(a.getAttribute('href')); }); }); }
+
+// ==========================================================================
+// Global wiring + init
+// ==========================================================================
+async function doLogout() {
+  try { await api.logout(); } catch (_) {}
+  state.user = null; state.meta.outlets = null;
+  navigate('/login');
+  toast('Signed out', 'info');
+}
+function initTheme() {
+  const saved = localStorage.getItem('theme');
+  // Explicit saved choice wins; otherwise follow the OS preference.
+  const light = saved ? saved === 'light' : !window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.body.classList.toggle('light', light);
+  updateThemeIcons();
+}
+function updateThemeIcons() {
+  const light = document.body.classList.contains('light');
+  $('.ico-sun').hidden = !light; $('.ico-moon').hidden = light;
 }
 
-function exportReportToExcel() {
-  if (_reportTickets.length === 0) return;
-  
-  let csvContent = '\uFEFF';
-  csvContent += 'Ticket ID,Subject,Status,Priority,Customer Name,Customer Email,Assignee,Created At\n';
-  
-  _reportTickets.forEach(t => {
-    const id = `#${t.id}`;
-    const subject = `"${t.title.replace(/"/g, '""')}"`;
-    const status = `"${t.status}"`;
-    const priority = `"${t.priority}"`;
-    const customerName = `"${t.customer_name.replace(/"/g, '""')}"`;
-    const customerEmail = `"${t.customer_email.replace(/"/g, '""')}"`;
-    const assignee = `"${(t.assignee_name || 'Unassigned').replace(/"/g, '""')}"`;
-    const createdAt = `"${formatDate(t.created_at)}"`;
-
-    csvContent += [id, subject, status, priority, customerName, customerEmail, assignee, createdAt].join(',') + '\n';
+document.addEventListener('DOMContentLoaded', async () => {
+  initTheme();
+  // Global controls
+  $('#btn-hamburger').addEventListener('click', openDrawer);
+  $('#drawer-close').addEventListener('click', closeDrawer);
+  $('#drawer-overlay').addEventListener('click', closeDrawer);
+  $('#btn-logout').addEventListener('click', doLogout);
+  $('#btn-report-quick').addEventListener('click', () => openReportModal());
+  $('#btn-theme').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark'); updateThemeIcons(); });
+  // Delegate auth-screen nav links
+  document.addEventListener('click', (e) => { const a = e.target.closest('[data-nav]'); if (a && $('#auth-root').contains(a)) { e.preventDefault(); navigate(a.getAttribute('href')); } });
+  // Escape closes the mobile drawer (when no modal is open to handle it first)
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal-root').hasChildNodes() && $('#app-shell').classList.contains('drawer-open')) closeDrawer(); });
+  // Password show/hide toggle (delegated — works for auth screens and modals)
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.pw-toggle'); if (!btn) return;
+    e.preventDefault();
+    const inp = $('input', btn.parentElement); if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    btn.innerHTML = svg(show ? EYE_OFF_ICON : EYE_ICON, 18);
+    btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    inp.focus();
   });
 
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.setAttribute('download', `Ticketing_Report_${new Date().toISOString().slice(0, 10)}.csv`);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-function exportReportToPDF() {
-  if (_reportTickets.length === 0) return;
-
-  const printWindow = window.open('', '_blank');
-  
-  const statusStr = elements.reportStatus.value || 'All Statuses';
-  const startStr = elements.reportStartDate.value || 'Any';
-  const endStr = elements.reportEndDate.value || 'Any';
-  const customerStr = elements.reportCustomer.options[elements.reportCustomer.selectedIndex]?.text || 'All Customers';
-  const agentStr = elements.reportAgent.options[elements.reportAgent.selectedIndex]?.text || 'All Agents';
-
-  printWindow.document.write(`
-    <html>
-      <head>
-        <title>OmniDesk Ticketing Report</title>
-        <style>
-          body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 30px; color: #0f172a; line-height: 1.5; }
-          .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #e2e8f0; padding-bottom: 20px; margin-bottom: 24px; }
-          .title { font-size: 24px; font-weight: 700; color: #4f46e5; margin: 0; }
-          .meta { font-size: 13px; color: #64748b; margin-top: 4px; }
-          .filters-summary { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 24px; font-size: 13px; }
-          .filters-summary h3 { margin-top: 0; margin-bottom: 8px; font-size: 14px; color: #334155; }
-          .filters-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-          th { background: #f1f5f9; color: #475569; font-weight: 600; text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #cbd5e1; }
-          th, td { padding: 12px 14px; font-size: 13px; border-bottom: 1px solid #e2e8f0; }
-          tr:hover { background-color: #f8fafc; }
-          .status-badge { display: inline-block; padding: 3px 8px; font-size: 11px; font-weight: 600; border-radius: 9999px; text-transform: uppercase; }
-          .status-new { background-color: #dbeafe; color: #1e40af; }
-          .status-open { background-color: #fee2e2; color: #991b1b; }
-          .status-pending { background-color: #fef3c7; color: #92400e; }
-          .status-solved { background-color: #d1fae5; color: #065f46; }
-          .status-closed { background-color: #f1f5f9; color: #374151; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div>
-            <h1 class="title">OmniDesk Ticketing Report</h1>
-            <div class="meta">Generated on ${new Date().toLocaleString()} by ${state.user ? state.user.username : 'Agent'}</div>
-          </div>
-        </div>
-        
-        <div class="filters-summary">
-          <h3>Report Filters Applied:</h3>
-          <div class="filters-grid">
-            <div><strong>Status:</strong> ${statusStr}</div>
-            <div><strong>Date Range:</strong> ${startStr} to ${endStr}</div>
-            <div><strong>Customer:</strong> ${customerStr}</div>
-            <div><strong>Agent:</strong> ${agentStr}</div>
-          </div>
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Subject</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Customer</th>
-              <th>Assignee</th>
-              <th>Created At</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${_reportTickets.map(t => {
-              let statusClass = 'status-new';
-              if (t.status === 'Open') statusClass = 'status-open';
-              else if (t.status === 'Pending') statusClass = 'status-pending';
-              else if (t.status === 'Solved') statusClass = 'status-solved';
-              else if (t.status === 'Closed') statusClass = 'status-closed';
-
-              return `
-                <tr>
-                  <td style="font-weight: 600; color: #4f46e5;">#${t.id}</td>
-                  <td style="font-weight: 500;">${t.title}</td>
-                  <td><span class="status-badge ${statusClass}">${t.status}</span></td>
-                  <td>${t.priority}</td>
-                  <td>${t.customer_name}<br><span style="font-size: 11px; color: #64748b;">${t.customer_email}</span></td>
-                  <td>${t.assignee_name || 'Unassigned'}</td>
-                  <td>${new Date(t.created_at).toLocaleDateString()}</td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-        
-        <script>
-          window.onload = function() {
-            setTimeout(function() {
-              window.print();
-              window.close();
-            }, 250);
-          }
-        </script>
-      </body>
-    </html>
-  `);
-  printWindow.document.close();
-}
-
-// Bind Reports event listeners
-if (elements.btnGenerateReport) {
-  elements.btnGenerateReport.addEventListener('click', handleGenerateReport);
-}
-if (elements.btnResetReportFilters) {
-  elements.btnResetReportFilters.addEventListener('click', handleResetReportFilters);
-}
-if (elements.btnExportPDF) {
-  elements.btnExportPDF.addEventListener('click', exportReportToPDF);
-}
-if (elements.btnExportExcel) {
-  elements.btnExportExcel.addEventListener('click', exportReportToExcel);
-}
-
+  // Session check
+  try { state.user = await api.me(); } catch (_) { state.user = null; }
+  $('#app-loading').classList.add('fade-out');
+  setTimeout(() => { $('#app-loading').hidden = true; }, 300);
+  if (state.user) boot();
+  route();
+});

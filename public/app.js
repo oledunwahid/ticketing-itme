@@ -12,11 +12,11 @@ const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
 const NAV = {
-  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories'],
-  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories'],
-  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories'],
-  TechnicianIT: ['tickets', 'categories'],
-  TechnicianME: ['tickets', 'categories'],
+  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
+  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
+  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
+  TechnicianIT: ['tickets', 'categories', 'locations'],
+  TechnicianME: ['tickets', 'categories', 'locations'],
   Requestor: ['tickets'],
   Leader: ['dashboard', 'tickets', 'reports'],
 };
@@ -28,6 +28,7 @@ const NAV_META = {
   reports: { label: 'Reports', icon: 'chart' },
   users: { label: 'Users', icon: 'users' },
   categories: { label: 'Categories', icon: 'tag' },
+  locations: { label: 'Locations', icon: 'mapPin' },
 };
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
@@ -37,6 +38,7 @@ const ICONS = {
   chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
   tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
+  mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
 };
 
 // ---- State ----
@@ -133,6 +135,10 @@ const api = {
   register: (b) => apiJSON('/api/auth/register', { method: 'POST', body: JSON.stringify(b) }),
   logout: () => rawFetch('/api/auth/logout', { method: 'POST' }),
   outlets: () => apiJSON('/api/meta/outlets'),
+  allOutlets: () => apiJSON('/api/outlets'),
+  createOutlet: (b) => apiJSON('/api/outlets', { method: 'POST', body: JSON.stringify(b) }),
+  patchOutlet: (id, b) => apiJSON('/api/outlets/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
+  deleteOutlet: (id) => apiJSON('/api/outlets/' + id, { method: 'DELETE' }),
   brands: () => apiJSON('/api/meta/brands'),
   categories: (dept) => apiJSON('/api/meta/categories?department=' + encodeURIComponent(dept)),
   allCategories: () => apiJSON('/api/categories'),
@@ -482,9 +488,9 @@ async function route() {
   const allowed = NAV[state.user.role] || [];
   if (name === 'tickets' && id) { state.route = { name: 'ticket', id }; setActiveNav('tickets'); animateViewIn(); return renderTicketDetail(id); }
   if (!allowed.includes(name) && !['ticket'].includes(name)) {
-    if (name === 'categories') {
-      state.route = { name: 'categories', id: null };
-      setActiveNav('categories');
+    if (name === 'categories' || name === 'locations') {
+      state.route = { name: name, id: null };
+      setActiveNav(name);
       animateViewIn();
       renderAccessDenied();
       return;
@@ -501,7 +507,8 @@ async function route() {
     schedules: renderSchedules,
     reports: renderReports,
     users: renderUsers,
-    categories: renderCategories
+    categories: renderCategories,
+    locations: renderLocations
   };
   (map[name] || renderDashboard)();
 }
@@ -1217,13 +1224,210 @@ async function confirmDeleteCategory(c, after) {
   }
 }
 
+// ==========================================================================
+// View: Locations (Admin Location Creation & Management Menu)
+// ==========================================================================
+async function renderLocations() {
+  view().innerHTML = `
+    <div class="page-head">
+      <h2>Location Management</h2>
+      <p>Create and manage outlet locations and their associated brands</p>
+    </div>
+    <div class="toolbar">
+      <div class="search">
+        <input id="loc-search" placeholder="Search outlet code, name or brand…">
+      </div>
+      <button class="btn-primary" id="loc-add">+ Add location</button>
+    </div>
+    <div class="panel">
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Outlet Code</th>
+              <th>Outlet Name</th>
+              <th>Brand</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="loc-body">
+            <tr><td colspan="5" class="loading-inline">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  let all = [];
+  const draw = (term = '') => {
+    const rows = all.filter((o) => 
+      !term || 
+      o.code.toLowerCase().includes(term) || 
+      o.name.toLowerCase().includes(term) || 
+      o.brand_code.toLowerCase().includes(term)
+    );
+    const tbody = $('#loc-body');
+    if (!tbody) return;
+    tbody.innerHTML = rows.length ? rows.map(outletRow).join('') : '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No locations found</td></tr>';
+    
+    // Bind actions
+    $$('[data-edit-loc]').forEach((b) => b.addEventListener('click', () => openOutletModal(all.find((x) => x.id == b.dataset.editLoc), reload)));
+    $$('[data-toggle-loc]').forEach((b) => b.addEventListener('click', () => toggleOutletActive(all.find((x) => x.id == b.dataset.toggleLoc), reload)));
+    $$('[data-del-loc]').forEach((b) => b.addEventListener('click', () => confirmDeleteOutlet(all.find((x) => x.id == b.dataset.delLoc), reload)));
+  };
+
+  const reload = async () => {
+    try {
+      all = await api.allOutlets();
+      draw($('#loc-search').value.trim().toLowerCase());
+    } catch (e) {
+      const tbody = $('#loc-body');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="5">${errBox(e)}</td></tr>`;
+    }
+  };
+
+  $('#loc-add').addEventListener('click', () => openOutletModal(null, reload));
+  $('#loc-search').addEventListener('input', debounce((e) => draw(e.target.value.trim().toLowerCase()), 200));
+  
+  try {
+    await reload();
+  } catch (e) {
+    const tbody = $('#loc-body');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5">${errBox(e)}</td></tr>`;
+  }
+}
+
+function outletRow(o) {
+  const statusBadge = o.active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>';
+  const toggleLabel = o.active ? 'Deactivate' : 'Activate';
+  const toggleClass = o.active ? 'color:var(--warn)' : 'color:var(--ok)';
+  return `
+    <tr>
+      <td><strong>${esc(o.code)}</strong></td>
+      <td>${esc(o.name)}</td>
+      <td><span class="badge" style="background:var(--surface-2);color:var(--text);border:1px solid var(--border)">${esc(o.brand_code)}</span></td>
+      <td>${statusBadge}</td>
+      <td class="nowrap">
+        <button class="btn-ghost" data-edit-loc="${o.id}" style="padding:6px 8px">Edit</button>
+        <button class="btn-ghost" data-toggle-loc="${o.id}" style="padding:6px 8px;${toggleClass}">${toggleLabel}</button>
+        <button class="btn-ghost" data-del-loc="${o.id}" style="padding:6px 8px;color:var(--danger)">Del</button>
+      </td>
+    </tr>`;
+}
+
+async function openOutletModal(o, after) {
+  const isEdit = !!o;
+  let brands = [];
+  try {
+    brands = await api.brands();
+  } catch (_) {}
+
+  // Allow choosing from existing brands, or adding/typing a brand
+  const brandOptions = brands.map(b => ({ value: b.code, label: b.name }));
+  
+  const v = await formModal(isEdit ? 'Edit Location' : 'Add Location', [
+    {
+      name: 'brand_code',
+      label: 'Brand',
+      type: 'select',
+      value: o ? o.brand_code : (brandOptions[0] ? brandOptions[0].value : ''),
+      options: brandOptions
+    },
+    {
+      name: 'custom_brand_code',
+      label: 'New Brand Code (Optional — use if brand is not in list above)',
+      type: 'text',
+      placeholder: 'e.g. UNION'
+    },
+    {
+      name: 'code',
+      label: 'Outlet Code (Unique short code)',
+      required: true,
+      value: o ? o.code : '',
+      placeholder: 'e.g. UTP'
+    },
+    {
+      name: 'name',
+      label: 'Outlet Name',
+      required: true,
+      value: o ? o.name : '',
+      placeholder: 'e.g. Union Plaza'
+    },
+    {
+      name: 'display_label',
+      label: 'Display Label (Optional — defaults to name)',
+      value: o ? (o.display_label || '') : '',
+      placeholder: 'e.g. Union Plaza'
+    }
+  ], isEdit ? 'Save' : 'Create');
+
+  if (!v) return;
+
+  // Derive brand_code (if custom_brand_code is filled, use it)
+  const brandCode = (v.custom_brand_code.trim() || v.brand_code).trim().toUpperCase();
+  if (!brandCode) {
+    toast('Brand is required', 'error');
+    return;
+  }
+
+  const payload = {
+    brand_code: brandCode,
+    code: v.code.trim().toUpperCase(),
+    name: v.name.trim(),
+    display_label: (v.display_label.trim() || v.name.trim())
+  };
+
+  try {
+    if (isEdit) {
+      await api.patchOutlet(o.id, payload);
+      toast('Location updated', 'success');
+    } else {
+      await api.createOutlet(payload);
+      toast('Location created', 'success');
+    }
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function toggleOutletActive(o, after) {
+  try {
+    await api.patchOutlet(o.id, { active: !o.active });
+    toast(`Location ${o.active ? 'deactivated' : 'activated'}`, 'success');
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function confirmDeleteOutlet(o, after) {
+  const v = await formModal('Delete Location: ' + o.name + '?', [
+    { 
+      name: 'confirm', 
+      label: '', 
+      type: 'checkbox', 
+      checkboxLabel: 'Yes, permanently delete this location', 
+      value: false 
+    }
+  ], 'Delete');
+  
+  if (!v || !v.confirm) return;
+  try {
+    await api.deleteOutlet(o.id);
+    toast('Location deleted', 'success');
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
 
 // ==========================================================================
 // Quick / detailed report modal
 // ==========================================================================
 let quickUploader = null;
 async function openReportModal() {
-  const outlets = await loadOutlets().catch(() => []);
+  const outlets = await api.outlets().catch(() => []);
   const brandsGroups = {};
   outlets.forEach((o) => { (brandsGroups[o.brand_code] = brandsGroups[o.brand_code] || []).push(o); });
   const lastOutlet = localStorage.getItem('lastOutlet') || '';

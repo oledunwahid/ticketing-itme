@@ -12,11 +12,11 @@ const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
 const NAV = {
-  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users'],
-  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports'],
-  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports'],
-  TechnicianIT: ['tickets'],
-  TechnicianME: ['tickets'],
+  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories'],
+  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories'],
+  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories'],
+  TechnicianIT: ['tickets', 'categories'],
+  TechnicianME: ['tickets', 'categories'],
   Requestor: ['tickets'],
   Leader: ['dashboard', 'tickets', 'reports'],
 };
@@ -27,6 +27,7 @@ const NAV_META = {
   schedules: { label: 'Schedules', icon: 'calendar' },
   reports: { label: 'Reports', icon: 'chart' },
   users: { label: 'Users', icon: 'users' },
+  categories: { label: 'Categories', icon: 'tag' },
 };
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
@@ -35,6 +36,7 @@ const ICONS = {
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
+  tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
 };
 
 // ---- State ----
@@ -133,6 +135,10 @@ const api = {
   outlets: () => apiJSON('/api/meta/outlets'),
   brands: () => apiJSON('/api/meta/brands'),
   categories: (dept) => apiJSON('/api/meta/categories?department=' + encodeURIComponent(dept)),
+  allCategories: () => apiJSON('/api/categories'),
+  createCategory: (b) => apiJSON('/api/categories', { method: 'POST', body: JSON.stringify(b) }),
+  patchCategory: (id, b) => apiJSON('/api/categories/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
+  deleteCategory: (id) => apiJSON('/api/categories/' + id, { method: 'DELETE' }),
   tickets: (qs = '') => apiJSON('/api/tickets' + (qs ? '?' + qs : '')),
   ticket: (id) => apiJSON('/api/tickets/' + id),
   createTicket: (b) => apiJSON('/api/tickets', { method: 'POST', body: JSON.stringify(b) }),
@@ -475,12 +481,44 @@ async function route() {
   // RBAC route guard (mirror backend; backend is source of truth)
   const allowed = NAV[state.user.role] || [];
   if (name === 'tickets' && id) { state.route = { name: 'ticket', id }; setActiveNav('tickets'); animateViewIn(); return renderTicketDetail(id); }
-  if (!allowed.includes(name) && !['ticket'].includes(name)) { return navigate(defaultRoute()); }
+  if (!allowed.includes(name) && !['ticket'].includes(name)) {
+    if (name === 'categories') {
+      state.route = { name: 'categories', id: null };
+      setActiveNav('categories');
+      animateViewIn();
+      renderAccessDenied();
+      return;
+    }
+    return navigate(defaultRoute());
+  }
   state.route = { name, id };
   setActiveNav(name);
   animateViewIn();
-  const map = { dashboard: renderDashboard, tickets: renderTickets, queue: renderQueue, schedules: renderSchedules, reports: renderReports, users: renderUsers };
+  const map = {
+    dashboard: renderDashboard,
+    tickets: renderTickets,
+    queue: renderQueue,
+    schedules: renderSchedules,
+    reports: renderReports,
+    users: renderUsers,
+    categories: renderCategories
+  };
   (map[name] || renderDashboard)();
+}
+
+function renderAccessDenied() {
+  $('#page-title').textContent = 'Access Denied';
+  view().innerHTML = `
+    <div class="empty">
+      <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--danger)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--danger);margin-bottom:16px">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      <h3 style="color:var(--danger);font-size:1.35rem;margin-bottom:8px">Access Denied</h3>
+      <p class="muted" style="max-width:380px;margin:0 auto 20px">You do not have the required permissions to access the Category Creation Menu.</p>
+      <button class="btn-primary" id="btn-denied-home">Go to Tickets</button>
+    </div>`;
+  $('#btn-denied-home').addEventListener('click', () => navigate('/tickets'));
 }
 
 // Retrigger the entrance animation on the view container each route change
@@ -1012,6 +1050,173 @@ async function confirmDeleteUser(u, after) {
   if (!v || !v.c) return;
   try { await api.delUser(u.id); toast('User deleted', 'success'); after(); } catch (e) { toast(e.message, 'error'); }
 }
+
+// ==========================================================================
+// View: Categories (Admin Category Creation & Management Menu)
+// ==========================================================================
+async function renderCategories() {
+  view().innerHTML = `
+    <div class="page-head">
+      <h2>Category Management</h2>
+      <p>Create and manage categories for IT and Mechanical departments</p>
+    </div>
+    <div class="toolbar">
+      <div class="search">
+        <input id="cat-search" placeholder="Search category name…">
+      </div>
+      <button class="btn-primary" id="cat-add">+ Add category</button>
+    </div>
+    <div class="panel">
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Category Name</th>
+              <th>Department</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="cat-body">
+            <tr><td colspan="4" class="loading-inline">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  let all = [];
+  const draw = (term = '') => {
+    const rows = all.filter((c) => 
+      !term || c.name.toLowerCase().includes(term) || c.department_code.toLowerCase().includes(term)
+    );
+    const tbody = $('#cat-body');
+    if (!tbody) return;
+    tbody.innerHTML = rows.length ? rows.map(categoryRow).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:20px">No categories found</td></tr>';
+    
+    // Bind actions
+    $$('[data-edit-cat]').forEach((b) => b.addEventListener('click', () => openCategoryModal(all.find((x) => x.id == b.dataset.editCat), reload)));
+    $$('[data-toggle-cat]').forEach((b) => b.addEventListener('click', () => toggleCategoryActive(all.find((x) => x.id == b.dataset.toggleCat), reload)));
+    $$('[data-del-cat]').forEach((b) => b.addEventListener('click', () => confirmDeleteCategory(all.find((x) => x.id == b.dataset.delCat), reload)));
+  };
+
+  const reload = async () => {
+    try {
+      all = await api.allCategories();
+      draw($('#cat-search').value.trim().toLowerCase());
+    } catch (e) {
+      const tbody = $('#cat-body');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="4">${errBox(e)}</td></tr>`;
+    }
+  };
+
+  $('#cat-add').addEventListener('click', () => openCategoryModal(null, reload));
+  $('#cat-search').addEventListener('input', debounce((e) => draw(e.target.value.trim().toLowerCase()), 200));
+  
+  try {
+    await reload();
+  } catch (e) {
+    const tbody = $('#cat-body');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="4">${errBox(e)}</td></tr>`;
+  }
+}
+
+function categoryRow(c) {
+  const statusBadge = c.active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>';
+  const toggleLabel = c.active ? 'Deactivate' : 'Activate';
+  const toggleClass = c.active ? 'color:var(--warn)' : 'color:var(--ok)';
+  return `
+    <tr>
+      <td><strong>${esc(c.name)}</strong></td>
+      <td>${deptTag(c.department_code)}</td>
+      <td>${statusBadge}</td>
+      <td class="nowrap">
+        <button class="btn-ghost" data-edit-cat="${c.id}" style="padding:6px 8px">Edit</button>
+        <button class="btn-ghost" data-toggle-cat="${c.id}" style="padding:6px 8px;${toggleClass}">${toggleLabel}</button>
+        <button class="btn-ghost" data-del-cat="${c.id}" style="padding:6px 8px;color:var(--danger)">Del</button>
+      </td>
+    </tr>`;
+}
+
+async function openCategoryModal(c, after) {
+  const isEdit = !!c;
+  const v = await formModal(isEdit ? 'Edit Category' : 'Add Category', [
+    { 
+      name: 'department_code', 
+      label: 'Category Type (Department)', 
+      type: 'select', 
+      value: c ? c.department_code : 'IT', 
+      options: [
+        { value: 'IT', label: 'IT' },
+        { value: 'ME', label: 'Mechanical' }
+      ] 
+    },
+    { 
+      name: 'name', 
+      label: 'Category Name', 
+      required: true, 
+      value: c ? c.name : '', 
+      placeholder: 'e.g. Network Outage or HVAC Repair' 
+    },
+    {
+      name: 'sort_order',
+      label: 'Sort Order',
+      type: 'number',
+      value: c ? String(c.sort_order) : '0'
+    }
+  ], isEdit ? 'Save' : 'Create');
+  
+  if (!v) return;
+  const payload = {
+    department_code: v.department_code,
+    name: v.name,
+    sort_order: Number(v.sort_order) || 0
+  };
+  
+  try {
+    if (isEdit) {
+      await api.patchCategory(c.id, payload);
+      toast('Category updated', 'success');
+    } else {
+      await api.createCategory(payload);
+      toast('Category created', 'success');
+    }
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function toggleCategoryActive(c, after) {
+  try {
+    await api.patchCategory(c.id, { active: !c.active });
+    toast(`Category ${c.active ? 'deactivated' : 'activated'}`, 'success');
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function confirmDeleteCategory(c, after) {
+  const v = await formModal('Delete Category: ' + c.name + '?', [
+    { 
+      name: 'confirm', 
+      label: '', 
+      type: 'checkbox', 
+      checkboxLabel: 'Yes, permanently delete this category', 
+      value: false 
+    }
+  ], 'Delete');
+  
+  if (!v || !v.confirm) return;
+  try {
+    await api.deleteCategory(c.id);
+    toast('Category deleted', 'success');
+    after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
 
 // ==========================================================================
 // Quick / detailed report modal

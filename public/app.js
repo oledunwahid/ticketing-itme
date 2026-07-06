@@ -157,6 +157,7 @@ const api = {
   addSchedule: (id, b) => apiJSON('/api/technicians/' + id + '/schedules', { method: 'POST', body: JSON.stringify(b) }),
   delSchedule: (id, sid) => apiJSON('/api/technicians/' + id + '/schedules/' + sid, { method: 'DELETE' }),
   addUnavail: (id, b) => apiJSON('/api/technicians/' + id + '/unavailability', { method: 'POST', body: JSON.stringify(b) }),
+  delUnavail: (id, uid) => apiJSON('/api/technicians/' + id + '/unavailability/' + uid, { method: 'DELETE' }),
   dashboard: () => apiJSON('/api/dashboard'),
   report: (qs) => apiJSON('/api/reports/tickets' + (qs ? '?' + qs : '')),
   users: () => apiJSON('/api/users'),
@@ -897,58 +898,356 @@ async function doAssign(t, techId, override, close, after) {
 }
 
 // ==========================================================================
-// View: Schedules
+// View: Schedules — big weekly calendar planner (+ cards view)
 // ==========================================================================
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-async function renderSchedules() {
-  const dept = state.user.role === 'AdminIT' ? 'IT' : state.user.role === 'AdminME' ? 'ME' : '';
-  view().innerHTML = `<div class="page-head"><h2>Technician schedules</h2><p>Availability drives assignment recommendations</p></div>
-    <div class="toolbar">${!dept ? `<select id="sch-dept"><option value="">All</option><option>IT</option><option>ME</option></select>` : ''}</div>
-    <div id="tech-list">${skeletonRows()}</div>`;
-  const load = async (d) => {
-    try {
-      const techs = await api.technicians(d || undefined);
-      const box = $('#tech-list');
-      if (!techs.length) { box.innerHTML = emptyBox('users', 'No technicians', 'Add technician users first.'); return; }
-      box.innerHTML = techs.map((t) => `<div class="panel mb"><div class="panel-head"><h3>${esc(t.username)} ${deptTag(t.department || (t.role === 'TechnicianIT' ? 'IT' : 'ME'))}</h3><span class="muted">${t.workload} open</span></div><div class="card" style="border:none" id="sch-${t.id}"><div class="loading-inline">Loading…</div></div></div>`).join('');
-      for (const t of techs) loadTechSchedule(t);
-    } catch (e) { $('#tech-list').innerHTML = errBox(e); }
-  };
-  if (!dept) $('#sch-dept').addEventListener('change', (e) => load(e.target.value));
-  load(dept);
+const DOW_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MON_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const CAL_HOUR_H = 46; // px per hour row
+
+const techDept = (t) => t.department || (t.role === 'TechnicianIT' ? 'IT' : t.role === 'TechnicianME' ? 'ME' : 'IT');
+function techInitials(name) {
+  return String(name || '?').trim().split(/\s+/).map((w) => w[0] || '').slice(0, 2).join('').toUpperCase() || '?';
 }
-async function loadTechSchedule(t) {
-  const box = $('#sch-' + t.id); if (!box) return;
+const hhmmToMin = (s) => { const p = String(s || '0:0').split(':'); return (Number(p[0]) || 0) * 60 + (Number(p[1]) || 0); };
+const pad2 = (n) => String(n).padStart(2, '0');
+const minLabel = (m) => pad2(Math.floor(m / 60)) + ':' + pad2(m % 60);
+
+const schedState = { view: 'calendar', weekOffset: 0, dept: '', search: '', startHour: 0, sidebarOpen: true, hidden: {}, data: null, lockedDept: '' };
+let _schedPop = null;
+
+function schedWeekDates(offset) {
+  const now = new Date();
+  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  base.setDate(base.getDate() - base.getDay() + offset * 7); // Sunday of target week
+  return Array.from({ length: 7 }, (_, i) => { const d = new Date(base); d.setDate(base.getDate() + i); return d; });
+}
+const fmtDay = (d) => MON_ABBR[d.getMonth()] + ' ' + d.getDate();
+const findTech = (id) => (schedState.data || []).find((r) => String(r.tech.id) === String(id));
+
+async function renderSchedules() {
+  const lockedDept = state.user.role === 'AdminIT' ? 'IT' : state.user.role === 'AdminME' ? 'ME' : '';
+  schedState.lockedDept = lockedDept;
+  schedState.dept = lockedDept || schedState.dept || '';
+  view().innerHTML = `
+    <div class="page-head"><h2>Technician schedules</h2><p>Weekly availability for IT &amp; Mechanical — plan coverage and assignments at a glance.</p></div>
+    <div class="sched-toolbar2">
+      <div class="sched-weeknav">
+        <button class="btn-outline btn-icon" id="wk-prev" title="Previous week" aria-label="Previous week">‹</button>
+        <button class="btn-outline btn-sm" id="wk-today">Today</button>
+        <button class="btn-outline btn-icon" id="wk-next" title="Next week" aria-label="Next week">›</button>
+        <span class="sched-weeklabel" id="wk-label">—</span>
+      </div>
+      <div class="sched-toolbar2-right">
+        ${!lockedDept ? `<select id="sch-dept" aria-label="Department"><option value="">All departments</option><option value="IT">IT</option><option value="ME">Mechanical</option></select>` : ''}
+        <div class="search"><input id="sch-search" placeholder="Search technician…" aria-label="Search technician"></div>
+        <button class="btn-outline btn-sm" id="sch-hours-toggle" title="Show 06:00–24:00 only">Business hrs</button>
+        <div class="seg" id="sch-viewseg"><button class="seg-b" data-view="calendar">Calendar</button><button class="seg-b" data-view="cards">Cards</button></div>
+      </div>
+    </div>
+    <div id="sched-content"><div class="loading-inline">Loading schedules…</div></div>`;
+
+  if (!lockedDept) { $('#sch-dept').value = schedState.dept; $('#sch-dept').addEventListener('change', (e) => { schedState.dept = e.target.value; fetchSched(); }); }
+  $('#sch-search').value = schedState.search;
+  $$('#sch-viewseg .seg-b').forEach((b) => { b.classList.toggle('active', b.dataset.view === schedState.view); b.addEventListener('click', () => { schedState.view = b.dataset.view; $$('#sch-viewseg .seg-b').forEach((x) => x.classList.toggle('active', x === b)); renderSchedContent(); }); });
+  $('#sch-hours-toggle').classList.toggle('active', schedState.startHour === 6);
+  $('#wk-prev').addEventListener('click', () => { schedState.weekOffset--; renderSchedContent(); });
+  $('#wk-next').addEventListener('click', () => { schedState.weekOffset++; renderSchedContent(); });
+  $('#wk-today').addEventListener('click', () => { schedState.weekOffset = 0; renderSchedContent(); });
+  $('#sch-hours-toggle').addEventListener('click', () => { schedState.startHour = schedState.startHour === 0 ? 6 : 0; $('#sch-hours-toggle').classList.toggle('active', schedState.startHour === 6); renderSchedContent(); });
+  $('#sch-search').addEventListener('input', debounce((e) => { schedState.search = e.target.value.trim().toLowerCase(); renderSchedContent(); }, 140));
+
+  await fetchSched();
+}
+
+async function fetchSched() {
+  const box = $('#sched-content'); if (box) box.innerHTML = `<div class="loading-inline">Loading schedules…</div>`;
   try {
-    const { schedules, unavailability } = await api.schedules(t.id);
-    box.innerHTML = `
-      <div class="chips mb">${schedules.length ? schedules.map((s) => `<span class="chip">${DOW[s.day_of_week]} ${s.start_time}–${s.end_time} <button data-del="${s.id}" class="pc-retry" style="color:var(--danger)">✕</button></span>`).join('') : '<span class="muted">No working hours set</span>'}</div>
-      ${unavailability.length ? `<div class="mb"><strong style="font-size:.8rem">Unavailable:</strong> ${unavailability.map((u) => `<span class="chip">${fmtDate(u.start_datetime)} → ${fmtDate(u.end_datetime)}${u.reason ? ' · ' + esc(u.reason) : ''}</span>`).join(' ')}</div>` : ''}
-      <div class="row wrap gap-sm"><button class="btn-outline" data-add="${t.id}" style="padding:7px 12px">+ Working hours</button><button class="btn-outline" data-off="${t.id}" style="padding:7px 12px">+ Day off / block</button></div>`;
-    $$('[data-del]', box).forEach((b) => b.addEventListener('click', async () => {
-      try { await api.delSchedule(t.id, b.dataset.del); toast('Working hours removed', 'success'); loadTechSchedule(t); }
-      catch (e) { toast(e.message, 'error'); }
+    const techs = await api.technicians(schedState.dept || undefined);
+    schedState.data = await Promise.all(techs.map(async (t) => {
+      try { const s = await api.schedules(t.id); return { tech: t, schedules: s.schedules || [], unavailability: s.unavailability || [] }; }
+      catch (_) { return { tech: t, schedules: [], unavailability: [] }; }
     }));
-    $('[data-add]', box).addEventListener('click', async () => {
-      const v = await formModal('Add working hours', [
-        { name: 'day_of_week', label: 'Day', type: 'select', value: '1', options: DOW.map((d, i) => ({ value: String(i), label: d })) },
-        { name: 'start_time', label: 'Start (HH:MM)', type: 'time', value: '09:00', required: true },
-        { name: 'end_time', label: 'End (HH:MM)', type: 'time', value: '18:00', required: true },
-      ], 'Add');
-      if (!v) return;
-      try { await api.addSchedule(t.id, { day_of_week: Number(v.day_of_week), start_time: v.start_time, end_time: v.end_time }); toast('Working hours added', 'success'); loadTechSchedule(t); }
-      catch (e) { toast(e.message, 'error'); }
+    renderSchedContent();
+  } catch (e) { const b = $('#sched-content'); if (b) b.innerHTML = errBox(e); }
+}
+
+function schedVisibleData() {
+  const q = schedState.search;
+  return (schedState.data || []).filter((r) => !schedState.hidden[r.tech.id] && (!q || String(r.tech.username).toLowerCase().includes(q)));
+}
+
+function renderSchedContent() {
+  closeSchedPopover();
+  const box = $('#sched-content'); if (!box) return;
+  const dates = schedWeekDates(schedState.weekOffset);
+  const lbl = $('#wk-label'); if (lbl) lbl.textContent = fmtDay(dates[0]) + ' – ' + fmtDay(dates[6]) + ', ' + dates[6].getFullYear();
+  if (!schedState.data) { box.innerHTML = `<div class="loading-inline">Loading…</div>`; return; }
+  if (!schedState.data.length) { box.innerHTML = emptyBox('users', 'No technicians', 'Add technician users first.'); return; }
+  box.innerHTML = schedState.view === 'cards' ? renderSchedCardsView() : renderSchedCalendarView(dates);
+  wireSchedContent();
+}
+
+// ---- calendar view --------------------------------------------------------
+function schedEventsForWeek(dates) {
+  const days = [[], [], [], [], [], [], []];
+  const rows = schedVisibleData();
+  rows.forEach((row) => {
+    const dept = techDept(row.tech);
+    row.schedules.forEach((s) => {
+      const di = s.day_of_week;
+      if (di >= 0 && di <= 6) days[di].push({ kind: 'work', tech: row.tech, dept, startMin: hhmmToMin(s.start_time), endMin: hhmmToMin(s.end_time), id: s.id });
     });
-    $('[data-off]', box).addEventListener('click', async () => {
-      const v = await formModal('Add unavailability', [
-        { name: 'start_datetime', label: 'From', type: 'datetime-local', required: true },
-        { name: 'end_datetime', label: 'To', type: 'datetime-local', required: true },
-        { name: 'reason', label: 'Reason', type: 'text' },
-      ], 'Add');
-      if (!v) return;
-      try { await api.addUnavail(t.id, v); toast('Unavailability saved', 'success'); loadTechSchedule(t); } catch (e) { toast(e.message, 'error'); }
+    row.unavailability.forEach((u) => {
+      const start = new Date(u.start_datetime), end = new Date(u.end_datetime);
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return;
+      dates.forEach((d, di) => {
+        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+        if (end < dayStart || start > dayEnd) return;
+        const s0 = start < dayStart ? 0 : start.getHours() * 60 + start.getMinutes();
+        const e0 = end > dayEnd ? 1440 : end.getHours() * 60 + end.getMinutes();
+        if (e0 > s0) days[di].push({ kind: 'off', tech: row.tech, dept, startMin: s0, endMin: e0, id: u.id });
+      });
     });
-  } catch (e) { box.innerHTML = errBox(e); }
+  });
+  return days;
+}
+
+function packDay(events) {
+  events.sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
+  let i = 0;
+  while (i < events.length) {
+    let clusterEnd = events[i].endMin, j = i + 1;
+    const cluster = [events[i]];
+    while (j < events.length && events[j].startMin < clusterEnd) { cluster.push(events[j]); clusterEnd = Math.max(clusterEnd, events[j].endMin); j++; }
+    const colEnds = [];
+    cluster.forEach((ev) => { let c = 0; while (c < colEnds.length && colEnds[c] > ev.startMin) c++; ev._col = c; colEnds[c] = ev.endMin; });
+    cluster.forEach((ev) => (ev._cols = colEnds.length));
+    i = j;
+  }
+}
+
+function schedBlockHTML(ev, startHour) {
+  const minTop = startHour * 60;
+  const effStart = Math.max(ev.startMin, minTop);
+  const top = ((effStart - minTop) / 60) * CAL_HOUR_H;
+  const height = Math.max(((ev.endMin - effStart) / 60) * CAL_HOUR_H, 22);
+  const w = 100 / (ev._cols || 1), left = (ev._col || 0) * w;
+  const range = minLabel(ev.startMin) + '–' + minLabel(ev.endMin);
+  const cls = ev.kind === 'off' ? 'cal-ev is-off' : 'cal-ev dept-' + ev.dept;
+  const title = (ev.kind === 'off' ? 'Day off' : ev.dept + ' hours') + ' · ' + ev.tech.username + ' · ' + range;
+  const body = ev.kind === 'off'
+    ? `<span class="cal-ev-t">${esc(ev.tech.username)}</span><span class="cal-ev-s">Day off</span>`
+    : `<span class="cal-ev-t">${esc(ev.tech.username)}</span><span class="cal-ev-s">${range}</span>${height > 52 ? `<span class="cal-ev-s2">${ev.tech.workload} open</span>` : ''}`;
+  return `<button class="${cls}" style="top:${top}px;height:${height}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="${esc(title)}" data-ev="${ev.kind}" data-id="${ev.id}" data-tech="${ev.tech.id}">${body}</button>`;
+}
+
+function renderSchedCalendarView(dates) {
+  const startHour = schedState.startHour;
+  const totalH = (24 - startHour) * CAL_HOUR_H;
+  const todayIdx = schedState.weekOffset === 0 ? new Date().getDay() : -1;
+  const dayEvents = schedEventsForWeek(dates);
+  dayEvents.forEach(packDay);
+
+  const headCells = dates.map((d, i) => `<div class="cal-dhead${i === todayIdx ? ' is-today' : ''}"><span class="cal-dow">${DOW[i]}</span><span class="cal-dnum">${d.getDate()}</span></div>`).join('');
+  const hours = []; for (let h = startHour; h <= 24; h++) hours.push(h);
+  const gutter = hours.map((h) => `<div class="cal-hr"><span>${h === 24 ? '24:00' : pad2(h) + ':00'}</span></div>`).join('');
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+  const cols = dates.map((d, i) => {
+    const blocks = dayEvents[i].map((ev) => schedBlockHTML(ev, startHour)).join('') || '';
+    let now = '';
+    if (i === todayIdx && nowMin >= startHour * 60) now = `<div class="cal-now" style="top:${((nowMin - startHour * 60) / 60) * CAL_HOUR_H}px"><span class="cal-now-dot"></span></div>`;
+    return `<div class="cal-col${i === todayIdx ? ' is-today' : ''}" style="height:${totalH}px">${blocks}${now}</div>`;
+  }).join('');
+
+  return `<div class="sched-layout${schedState.sidebarOpen ? '' : ' sidebar-collapsed'}">
+    ${renderSchedSidebar(dates)}
+    <div class="cal-wrap">
+      <div class="cal">
+        <div class="cal-head">
+          <div class="cal-corner"><button class="cal-sb-toggle" id="cal-sb-toggle" title="Toggle side panel" aria-label="Toggle side panel">☰</button></div>
+          ${headCells}
+        </div>
+        <div class="cal-body">
+          <div class="cal-gutter" style="height:${totalH}px">${gutter}</div>
+          ${cols}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderSchedSidebar(dates) {
+  const all = schedState.data || [];
+  const it = all.filter((r) => techDept(r.tech) === 'IT').length;
+  const me = all.filter((r) => techDept(r.tech) === 'ME').length;
+  const now = new Date(), nowDay = now.getDay(), nowMin = now.getHours() * 60 + now.getMinutes();
+  const isCurrent = schedState.weekOffset === 0;
+  let availNow = 0, offNow = 0;
+  all.forEach((r) => {
+    const working = r.schedules.some((s) => s.day_of_week === nowDay && hhmmToMin(s.start_time) <= nowMin && hhmmToMin(s.end_time) > nowMin);
+    const blocked = r.unavailability.some((u) => { const s = new Date(u.start_datetime), e = new Date(u.end_datetime); return s <= now && now <= e; });
+    if (working && !blocked) availNow++;
+    if (blocked) offNow++;
+  });
+  const stat = (n, l, cls) => `<div class="sched-stat ${cls || ''}"><span class="n">${n}</span><span class="l">${l}</span></div>`;
+  const rows = all.map((r) => {
+    const dept = techDept(r.tech);
+    return `<div class="sched-techrow" data-tech="${r.tech.id}">
+      <label class="sched-techrow-main"><input type="checkbox" ${schedState.hidden[r.tech.id] ? '' : 'checked'} data-toggle="${r.tech.id}"><span class="sched-dot dept-${dept}"></span><span class="sched-techrow-name">${esc(r.tech.username)}</span>${deptTag(dept)}</label>
+      <span class="sched-techrow-open" title="Open tickets">${r.tech.workload}</span>
+      <button class="mini-btn" data-add-hrs="${r.tech.id}" title="Add working hours">＋</button>
+      <button class="mini-btn" data-add-off="${r.tech.id}" title="Add day off / block">⦸</button>
+    </div>`;
+  }).join('');
+  return `<aside class="sched-side">
+    <div class="sched-side-stats">
+      ${stat(all.length, 'Technicians')}${stat(it, 'IT', 'is-it')}${stat(me, 'ME', 'is-me')}
+      ${stat(isCurrent ? availNow : '—', 'Available now', 'is-ok')}${stat(isCurrent ? offNow : '—', 'Off / blocked', 'is-off')}
+    </div>
+    <div class="sched-side-sec"><div class="sched-side-h">Technicians</div><div class="sched-techlist">${rows || '<p class="muted" style="font-size:.8rem;padding:4px 2px">No technicians</p>'}</div></div>
+    <div class="sched-side-sec"><div class="sched-side-h">Legend</div><div class="sched-legend2">
+      <span><i class="sw sw-it"></i>IT working hours</span><span><i class="sw sw-me"></i>ME working hours</span>
+      <span><i class="sw sw-off"></i>Day off / blocked</span><span><i class="sw sw-now"></i>Current time</span>
+    </div></div>
+  </aside>`;
+}
+
+// ---- cards view (compact per-technician week) -----------------------------
+function renderSchedCardsView() {
+  const rows = schedVisibleData();
+  if (!rows.length) return emptyBox('users', 'No technicians', 'No technician matches your filters.');
+  const today = schedState.weekOffset === 0 ? new Date().getDay() : -1;
+  return rows.map((row) => {
+    const t = row.tech, dept = techDept(t);
+    const byDay = [[], [], [], [], [], [], []];
+    row.schedules.forEach((s) => { if (byDay[s.day_of_week]) byDay[s.day_of_week].push(s); });
+    byDay.forEach((a) => a.sort((x, y) => String(x.start_time).localeCompare(String(y.start_time))));
+    const week = DOW.map((dn, i) => `<div class="sched-daycol${i === today ? ' is-today' : ''}"><div class="sched-dayname">${dn}</div><div class="sched-daybody">${byDay[i].length ? byDay[i].map((s) => `<div class="sched-block"><span class="sched-time">${esc(s.start_time)}–${esc(s.end_time)}</span><button class="sched-del" data-del="${s.id}" data-tech="${t.id}" title="Remove">✕</button></div>`).join('') : '<div class="sched-off-cell">Off</div>'}</div></div>`).join('');
+    const timeoff = row.unavailability.length ? `<div class="sched-timeoff"><div class="sched-timeoff-label">Day off / blocked time</div><div class="sched-timeoff-list">${row.unavailability.map((u) => `<div class="sched-offblock"><span class="sched-offblock-range">${esc(fmtDate(u.start_datetime))} → ${esc(fmtDate(u.end_datetime))}</span>${u.reason ? `<span class="sched-offblock-reason">${esc(u.reason)}</span>` : ''}<button class="sched-del" data-udel="${u.id}" data-tech="${t.id}" title="Remove">✕</button></div>`).join('')}</div></div>` : '';
+    const hint = row.schedules.length ? '' : `<div class="sched-emptyhint">No working hours set yet.</div>`;
+    return `<div class="panel sched-tech sched-dept-${dept}">
+      <div class="sched-tech-head"><div class="sched-tech-id"><span class="sched-avatar">${esc(techInitials(t.username))}</span><div class="sched-tech-meta"><div class="sched-tech-name">${esc(t.username)} ${deptTag(dept)}</div><div class="sched-tech-sub">${dept} Technician · <strong>${t.workload}</strong> open</div></div></div>
+      <div class="sched-tech-actions"><button class="btn-outline btn-sm" data-add-hrs="${t.id}">+ Working hours</button><button class="btn-outline btn-sm" data-add-off="${t.id}">+ Day off</button></div></div>
+      <div class="sched-body">${week}${hint}${timeoff}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---- shared wiring & actions ---------------------------------------------
+function wireSchedContent() {
+  const box = $('#sched-content'); if (!box) return;
+  const sb = $('#cal-sb-toggle', box);
+  if (sb) sb.addEventListener('click', () => { schedState.sidebarOpen = !schedState.sidebarOpen; renderSchedContent(); });
+  $$('[data-toggle]', box).forEach((cb) => cb.addEventListener('change', () => { schedState.hidden[cb.dataset.toggle] = !cb.checked; renderSchedContent(); }));
+  $$('[data-add-hrs]', box).forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); const r = findTech(b.dataset.addHrs); if (r) schedAddHours(r.tech); }));
+  $$('[data-add-off]', box).forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); const r = findTech(b.dataset.addOff); if (r) schedAddOff(r.tech); }));
+  $$('.cal-ev', box).forEach((el) => el.addEventListener('click', (e) => { e.stopPropagation(); openEventPopover(el); }));
+  $$('.sched-del[data-del]', box).forEach((b) => b.addEventListener('click', async (e) => {
+    e.preventDefault(); const r = findTech(b.dataset.tech); if (!r) return;
+    if (!(await confirmModal('Remove working hours', 'Remove this working-hours block?', 'Remove'))) return;
+    try { await api.delSchedule(r.tech.id, b.dataset.del); toast('Working hours removed', 'success'); fetchSched(); } catch (err) { toast(err.message, 'error'); }
+  }));
+  $$('.sched-del[data-udel]', box).forEach((b) => b.addEventListener('click', async (e) => {
+    e.preventDefault(); const r = findTech(b.dataset.tech); if (!r) return;
+    if (!(await confirmModal('Remove block', 'Remove this day off / blocked time?', 'Remove'))) return;
+    try { await api.delUnavail(r.tech.id, b.dataset.udel); toast('Block removed', 'success'); fetchSched(); } catch (err) { toast(err.message, 'error'); }
+  }));
+}
+
+async function schedAddHours(t) {
+  const v = await formModal('Add working hours — ' + t.username, [
+    { name: 'day_of_week', label: 'Day', type: 'select', value: '1', options: DOW.map((d, i) => ({ value: String(i), label: DOW_FULL[i] })) },
+    { name: 'start_time', label: 'Start time', type: 'time', value: '09:00', required: true },
+    { name: 'end_time', label: 'End time', type: 'time', value: '18:00', required: true },
+  ], 'Add hours');
+  if (!v) return;
+  if (v.end_time <= v.start_time) return toast('End time must be after start time', 'error');
+  try { await api.addSchedule(t.id, { day_of_week: Number(v.day_of_week), start_time: v.start_time, end_time: v.end_time }); toast('Working hours added', 'success'); fetchSched(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+async function schedAddOff(t) {
+  const v = await formModal('Add day off / block — ' + t.username, [
+    { name: 'start_datetime', label: 'From', type: 'datetime-local', required: true },
+    { name: 'end_datetime', label: 'To', type: 'datetime-local', required: true },
+    { name: 'reason', label: 'Reason (optional)', type: 'text', placeholder: 'e.g. Annual leave' },
+  ], 'Save block');
+  if (!v) return;
+  if (v.end_datetime <= v.start_datetime) return toast('End must be after start', 'error');
+  try { await api.addUnavail(t.id, v); toast('Day off / block saved', 'success'); fetchSched(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
+// ---- event popover --------------------------------------------------------
+function openSchedPopover(anchorEl, html) {
+  closeSchedPopover();
+  const pop = document.createElement('div');
+  pop.className = 'sched-pop';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+  const r = anchorEl.getBoundingClientRect();
+  const pr = pop.getBoundingClientRect();
+  let left = r.right + 8; if (left + pr.width > window.innerWidth - 8) left = r.left - pr.width - 8;
+  if (left < 8) left = Math.max(8, Math.min(r.left, window.innerWidth - pr.width - 8));
+  let top = r.top; if (top + pr.height > window.innerHeight - 8) top = window.innerHeight - pr.height - 8;
+  if (top < 8) top = 8;
+  pop.style.left = left + 'px'; pop.style.top = top + 'px';
+  const onDoc = (e) => { if (!pop.contains(e.target)) closeSchedPopover(); };
+  const onKey = (e) => { if (e.key === 'Escape') closeSchedPopover(); };
+  setTimeout(() => { document.addEventListener('mousedown', onDoc); document.addEventListener('keydown', onKey); }, 0);
+  _schedPop = { el: pop, onDoc, onKey };
+  return pop;
+}
+function closeSchedPopover() {
+  if (!_schedPop) return;
+  document.removeEventListener('mousedown', _schedPop.onDoc);
+  document.removeEventListener('keydown', _schedPop.onKey);
+  _schedPop.el.remove();
+  _schedPop = null;
+}
+function openEventPopover(el) {
+  const kind = el.dataset.ev, id = el.dataset.id, r = findTech(el.dataset.tech);
+  if (!r) return;
+  const dept = techDept(r.tech);
+  let html, onDelete;
+  if (kind === 'off') {
+    const u = r.unavailability.find((x) => String(x.id) === String(id)); if (!u) return;
+    html = `<div class="pop-head"><span class="sched-dot sw-off"></span><strong>${esc(r.tech.username)}</strong> ${deptTag(dept)}</div>
+      <div class="pop-row"><span>Type</span><b>Day off / blocked</b></div>
+      <div class="pop-row"><span>From</span><b>${esc(fmtDate(u.start_datetime))}</b></div>
+      <div class="pop-row"><span>To</span><b>${esc(fmtDate(u.end_datetime))}</b></div>
+      ${u.reason ? `<div class="pop-row"><span>Reason</span><b>${esc(u.reason)}</b></div>` : ''}
+      <div class="pop-foot"><button class="btn-danger btn-sm" data-del>Delete block</button></div>`;
+    onDelete = async () => { if (!(await confirmModal('Remove block', 'Remove this day off / blocked time?', 'Remove'))) return; try { await api.delUnavail(r.tech.id, u.id); toast('Block removed', 'success'); closeSchedPopover(); fetchSched(); } catch (e) { toast(e.message, 'error'); } };
+  } else {
+    const s = r.schedules.find((x) => String(x.id) === String(id)); if (!s) return;
+    html = `<div class="pop-head"><span class="sched-dot dept-${dept}"></span><strong>${esc(r.tech.username)}</strong> ${deptTag(dept)}</div>
+      <div class="pop-row"><span>Day</span><b>${DOW_FULL[s.day_of_week]}</b></div>
+      <div class="pop-row"><span>Hours</span><b>${esc(s.start_time)}–${esc(s.end_time)}</b></div>
+      <div class="pop-row"><span>Open tickets</span><b>${r.tech.workload}</b></div>
+      <div class="pop-foot"><button class="btn-danger btn-sm" data-del>Delete hours</button></div>`;
+    onDelete = async () => { if (!(await confirmModal('Remove working hours', 'Remove this working-hours block?', 'Remove'))) return; try { await api.delSchedule(r.tech.id, s.id); toast('Working hours removed', 'success'); closeSchedPopover(); fetchSched(); } catch (e) { toast(e.message, 'error'); } };
+  }
+  const pop = openSchedPopover(el, html);
+  $('[data-del]', pop).addEventListener('click', onDelete);
+}
+
+// Lightweight confirm dialog → resolves true (confirmed) / false (cancelled)
+function confirmModal(title, message, okLabel = 'Delete') {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    openModal({
+      title,
+      bodyHTML: `<p class="confirm-text">${esc(message)}</p>`,
+      footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-danger" data-ok>${esc(okLabel)}</button>`,
+      onMount(ov, close) {
+        $('[data-ok]', ov).addEventListener('click', () => { settle(true); close(); });
+        $('[data-cancel]', ov).addEventListener('click', () => { settle(false); close(); });
+      },
+    });
+  });
 }
 
 // ==========================================================================

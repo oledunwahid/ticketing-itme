@@ -439,3 +439,163 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   }
   .stat:hover, .ticket-row:hover { transform: none; }
 }
+
+/* ==========================================================================
+   Schedules — weekly calendar-style layout
+   ========================================================================== */
+.sched-toolbar { align-items: center; }
+.sched-legend { display: flex; gap: 14px; margin-left: auto; flex-wrap: wrap; }
+.sched-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-muted); }
+.sched-legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex: none; }
+.sw-it { background: rgba(59, 130, 246, 0.45); border: 1px solid #60a5fa; }
+.sw-me { background: rgba(245, 158, 11, 0.45); border: 1px solid #fbbf24; }
+.sw-off { background: rgba(239, 68, 68, 0.30); border: 1px solid #ef4444; }
+
+.btn-sm { padding: 6px 11px; font-size: 0.8rem; }
+
+.sched-tech { margin-bottom: 14px; }
+.sched-tech-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.sched-tech-id { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.sched-avatar { width: 38px; height: 38px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); display: grid; place-items: center; font-weight: 800; font-size: 0.82rem; color: var(--text-2); flex: none; }
+.sched-dept-IT .sched-avatar { background: rgba(59, 130, 246, 0.14); border-color: rgba(59, 130, 246, 0.40); color: #60a5fa; }
+.sched-dept-ME .sched-avatar { background: rgba(245, 158, 11, 0.14); border-color: rgba(245, 158, 11, 0.40); color: #fbbf24; }
+.sched-tech-name { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.98rem; }
+.sched-tech-sub { color: var(--text-muted); font-size: 0.78rem; margin-top: 2px; }
+.sched-tech-sub strong { color: var(--text-2); }
+.sched-tech-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.sched-body { padding: 14px 16px; }
+.sched-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+.sched-daycol { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.sched-daycol.is-today { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.sched-dayname { text-align: center; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); padding: 7px 4px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.sched-daycol.is-today .sched-dayname { color: #c7d2fe; background: var(--primary-soft); }
+.sched-daybody { padding: 7px 6px; display: flex; flex-direction: column; gap: 6px; min-height: 62px; }
+.sched-block { display: flex; align-items: center; gap: 4px; justify-content: space-between; font-size: 0.76rem; font-weight: 600; padding: 6px 7px; border-radius: 8px; background: var(--primary-soft); border: 1px solid rgba(79, 70, 229, 0.35); color: var(--text); }
+.sched-dept-IT .sched-block { background: rgba(59, 130, 246, 0.16); border-color: rgba(59, 130, 246, 0.40); }
+.sched-dept-ME .sched-block { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.40); }
+.sched-time { white-space: nowrap; }
+.sched-off-cell { text-align: center; font-size: 0.72rem; color: var(--text-muted); padding: 8px 0; opacity: 0.65; }
+.sched-del { background: transparent; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.72rem; line-height: 1; padding: 2px 3px; border-radius: 5px; flex: none; transition: background 0.12s, color 0.12s; }
+.sched-del:hover { color: #fff; background: var(--danger); }
+
+.sched-emptyhint { margin-top: 12px; font-size: 0.8rem; color: var(--text-muted); background: var(--bg-2); border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
+
+.sched-timeoff { margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--border); }
+.sched-timeoff-label { font-size: 0.74rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: #fca5a5; margin-bottom: 8px; }
+.sched-timeoff-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.sched-offblock { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; padding: 7px 10px; border-radius: 8px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #fecaca; }
+.sched-offblock-reason { color: var(--text-2); font-size: 0.76rem; opacity: 0.9; }
+.sched-offblock .sched-del { color: #fca5a5; }
+.sched-offblock .sched-del:hover { color: #fff; }
+
+.confirm-text { color: var(--text-2); font-size: 0.92rem; line-height: 1.55; }
+
+/* Narrow screens: collapse the 7-column grid into stacked daily rows */
+@media (max-width: 720px) {
+  .sched-legend { width: 100%; margin-left: 0; }
+  .sched-tech-actions { width: 100%; }
+  .sched-tech-actions .btn-sm { flex: 1; }
+  .sched-week { grid-template-columns: 1fr; gap: 7px; }
+  .sched-daycol { flex-direction: row; align-items: stretch; }
+  .sched-dayname { display: flex; align-items: center; justify-content: flex-start; width: 68px; flex: none; border-bottom: none; border-right: 1px solid var(--border); }
+  .sched-daybody { flex: 1; min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .sched-off-cell { padding: 6px 2px; }
+}
+
+/* ==========================================================================
+   Schedules — big weekly calendar planner
+   ========================================================================== */
+.sched-toolbar2 { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.sched-weeknav { display: flex; align-items: center; gap: 8px; }
+.sched-weeklabel { font-weight: 700; font-size: 0.95rem; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.sched-toolbar2-right { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.sched-toolbar2-right select, .sched-toolbar2-right input { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 8px 11px; font-size: 0.85rem; font-family: inherit; }
+.sched-toolbar2-right .search { min-width: 160px; }
+.sched-toolbar2-right .search input { width: 100%; }
+.btn-icon { padding: 6px 11px; font-size: 1rem; line-height: 1; }
+.btn-outline.active { background: var(--primary-soft); border-color: var(--primary); color: #c7d2fe; }
+
+.seg { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: 9px; padding: 3px; gap: 3px; }
+.seg-b { border: none; background: transparent; color: var(--text-2); font-weight: 600; font-size: 0.8rem; padding: 6px 12px; border-radius: 7px; cursor: pointer; font-family: inherit; }
+.seg-b.active { background: var(--primary); color: #fff; }
+
+.sched-layout { display: grid; grid-template-columns: 258px 1fr; gap: 14px; align-items: start; }
+.sched-layout.sidebar-collapsed { grid-template-columns: 1fr; }
+.sched-layout.sidebar-collapsed .sched-side { display: none; }
+
+/* sidebar */
+.sched-side { display: flex; flex-direction: column; gap: 14px; }
+.sched-side-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sched-stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; display: flex; flex-direction: column; gap: 1px; }
+.sched-stat:first-child { grid-column: 1 / -1; }
+.sched-stat .n { font-size: 1.25rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.sched-stat .l { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.sched-stat.is-it .n { color: #60a5fa; } .sched-stat.is-me .n { color: #fbbf24; }
+.sched-stat.is-ok .n { color: var(--ok); } .sched-stat.is-off .n { color: #fca5a5; }
+.sched-side-sec { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 11px 12px; }
+.sched-side-h { font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 9px; }
+.sched-techlist { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow: auto; }
+.sched-techrow { display: flex; align-items: center; gap: 7px; padding: 5px 4px; border-radius: 7px; }
+.sched-techrow:hover { background: var(--bg-2); }
+.sched-techrow-main { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; cursor: pointer; }
+.sched-techrow-main input { width: auto; flex: none; accent-color: var(--primary); }
+.sched-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.sched-dot.dept-IT { background: #60a5fa; } .sched-dot.dept-ME { background: #fbbf24; } .sched-dot.sw-off { background: #ef4444; }
+.sched-techrow-name { font-size: 0.83rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-techrow-open { font-size: 0.72rem; color: var(--text-muted); background: var(--bg-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
+.mini-btn { width: 24px; height: 24px; flex: none; border: 1px solid var(--border); background: transparent; color: var(--text-2); border-radius: 6px; cursor: pointer; font-size: 0.85rem; line-height: 1; display: grid; place-items: center; }
+.mini-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--primary); }
+.sched-legend2 { display: flex; flex-direction: column; gap: 7px; }
+.sched-legend2 span { display: inline-flex; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--text-2); }
+.sw-now { background: var(--danger); }
+
+/* calendar board */
+.cal-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); position: relative; }
+.cal { min-width: 760px; }
+.cal-head, .cal-body { display: grid; grid-template-columns: 58px repeat(7, minmax(94px, 1fr)); }
+.cal-head { position: sticky; top: 0; z-index: 6; background: var(--surface); border-bottom: 1px solid var(--border); }
+.cal-corner { position: sticky; left: 0; z-index: 7; background: var(--surface); border-right: 1px solid var(--border); display: grid; place-items: center; }
+.cal-sb-toggle { background: transparent; border: 1px solid var(--border); color: var(--text-2); border-radius: 6px; width: 30px; height: 30px; cursor: pointer; font-size: 0.85rem; }
+.cal-sb-toggle:hover { background: var(--surface-2); color: var(--text); }
+.cal-dhead { padding: 8px 6px; text-align: center; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 1px; }
+.cal-dhead .cal-dow { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+.cal-dhead .cal-dnum { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cal-dhead.is-today { background: var(--primary-soft); }
+.cal-dhead.is-today .cal-dow, .cal-dhead.is-today .cal-dnum { color: #c7d2fe; }
+.cal-gutter { position: sticky; left: 0; z-index: 5; background: var(--surface); border-right: 1px solid var(--border); }
+.cal-hr { height: 46px; position: relative; }
+.cal-hr span { position: absolute; top: -7px; right: 7px; font-size: 0.68rem; color: var(--text-muted); background: var(--surface); padding: 0 3px; font-variant-numeric: tabular-nums; }
+.cal-col { position: relative; border-right: 1px solid var(--border); background-image: repeating-linear-gradient(to bottom, rgba(255,255,255,.055) 0, rgba(255,255,255,.055) 1px, transparent 1px, transparent 46px); }
+.cal-col.is-today { background-color: rgba(79, 70, 229, 0.06); }
+.cal-ev { position: absolute; overflow: hidden; border-radius: 7px; padding: 4px 6px; text-align: left; cursor: pointer; border: 1px solid transparent; display: flex; flex-direction: column; gap: 0; font-family: inherit; color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: filter .12s; }
+.cal-ev:hover { filter: brightness(1.12); z-index: 3; }
+.cal-ev:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.cal-ev.dept-IT { background: rgba(59,130,246,.22); border-color: rgba(96,165,250,.55); }
+.cal-ev.dept-ME { background: rgba(245,158,11,.22); border-color: rgba(251,191,36,.55); }
+.cal-ev.is-off { background: rgba(239,68,68,.20); border-color: rgba(239,68,68,.5); background-image: repeating-linear-gradient(45deg, rgba(239,68,68,.10) 0, rgba(239,68,68,.10) 6px, transparent 6px, transparent 12px); }
+.cal-ev-t { font-size: 0.78rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-ev-s { font-size: 0.7rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.cal-ev-s2 { font-size: 0.68rem; color: var(--text-muted); }
+.cal-now { position: absolute; left: 0; right: 0; height: 2px; background: var(--danger); z-index: 4; pointer-events: none; }
+.cal-now-dot { position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+
+/* event popover */
+.sched-pop { position: fixed; z-index: 200; width: 250px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 12px 13px; }
+.sched-pop .pop-head { display: flex; align-items: center; gap: 7px; font-size: 0.92rem; margin-bottom: 9px; }
+.sched-pop .pop-row { display: flex; justify-content: space-between; gap: 12px; font-size: 0.82rem; padding: 3px 0; }
+.sched-pop .pop-row span { color: var(--text-muted); } .sched-pop .pop-row b { color: var(--text); text-align: right; }
+.sched-pop .pop-foot { margin-top: 11px; display: flex; justify-content: flex-end; }
+
+@media (max-width: 880px) {
+  .sched-layout { grid-template-columns: 1fr; }
+  .sched-layout .sched-side { display: flex; }
+  .sched-side-stats { grid-template-columns: repeat(3, 1fr); }
+  .sched-stat:first-child { grid-column: auto; }
+  .sched-techlist { max-height: 180px; }
+}
+@media (max-width: 620px) {
+  .sched-toolbar2 { flex-direction: column; align-items: stretch; }
+  .sched-toolbar2-right { justify-content: space-between; }
+  .sched-side-stats { grid-template-columns: repeat(2, 1fr); }
+}

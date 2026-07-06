@@ -279,7 +279,15 @@ class Uploader {
     this.zone = zone; this.list = list; this.items = [];
     this.chunkSize = 2 * 1024 * 1024;
     const input = $('input[type=file]', zone);
-    zone.addEventListener('click', (e) => { if (e.target.closest('.preview-card')) return; input.click(); });
+    zone.addEventListener('click', (e) => {
+      if (e.target.closest('.preview-card')) return;
+      // The file input is an invisible overlay (position:absolute; inset:0) covering the
+      // whole zone, so a click on it already opens the picker natively. Only trigger it
+      // programmatically for clicks that did NOT land on the input — otherwise the picker
+      // opens twice (native + programmatic).
+      if (e.target === input) return;
+      input.click();
+    });
     zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
     zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
     zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('dragover'); this.add(e.dataTransfer.files); });
@@ -857,7 +865,7 @@ async function openAssignModal(t, after) {
       <label class="row gap-sm" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>`,
     footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign selected</button>`,
     size: 'lg',
-    async onMount(ov) {
+    async onMount(ov, close) {
       $('[data-cancel]', ov).addEventListener('click', close);
       try {
         const [recs, techs] = await Promise.all([api.recommend(t.id), api.technicians(t.department)]);
@@ -1453,14 +1461,14 @@ async function openReportModal() {
   const foot = `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" id="q-submit">Submit report</button>`;
   const { overlay, close } = openModal({
     title: 'Report an issue', bodyHTML: body, footHTML: foot, size: 'lg',
-    onMount(ov) {
+    onMount(ov, close) {
       quickUploader = new Uploader($('#q-up', ov), $('#q-up-list', ov));
       let dept = '';
       $$('[data-dept]', ov).forEach((b) => b.addEventListener('click', async () => {
         dept = b.dataset.dept;
         $$('[data-dept]', ov).forEach((x) => x.classList.toggle('active', x === b));
         const sel = $('#q-cat', ov); sel.disabled = true; sel.innerHTML = '<option>Loading…</option>';
-        try { const cats = await api.categories(dept); sel.innerHTML = '<option value="">Select category…</option>' + cats.map((c) => `<option>${esc(c.name)}</option>`).join(''); sel.disabled = false; }
+        try { const cats = await api.categories(dept); sel.innerHTML = '<option value="">Select category…</option>' + cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join(''); sel.disabled = false; }
         catch (e) { sel.innerHTML = '<option>Failed to load</option>'; }
       }));
       let urg = 'Medium';

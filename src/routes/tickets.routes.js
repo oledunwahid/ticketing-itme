@@ -692,6 +692,22 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
       channels: ["in_app"],
     });
 
+    // Notify customer (WhatsApp) if a contact number was provided.
+    if (b.contact_number) {
+      notify("ticket.created", {
+        ticketId,
+        ticketNumber,
+        recipients: [
+          {
+            name: b.contact_person || requestorName,
+            phone: b.contact_number,
+          },
+        ],
+        message: `Tiket pelaporan anda sudah dibuat tiket anda adalah : ${ticketNumber}`,
+        channels: ["whatsapp"],
+      });
+    }
+
     const ticket = await db.pGet("SELECT * FROM tickets WHERE id = ?", [
       ticketId,
     ]);

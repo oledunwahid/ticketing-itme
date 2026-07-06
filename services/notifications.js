@@ -1,11 +1,12 @@
 /* ==========================================================================
    Notification service abstraction.
-   Channels: in_app (always logged), email (placeholder), whatsapp/Fonnte
-   (placeholder). Real external sending is DISABLED unless explicitly enabled
+   Channels: in_app (always logged), email (placeholder), whatsapp/Fonnte.
+   Real external sending is DISABLED unless explicitly enabled
    via env — safe for prototype/demo. Everything is recorded in
    notification_logs for audit + future replay.
    ========================================================================== */
 const db = require('../database');
+const { sendWhatsApp } = require('./fonnte');
 
 const CONFIG = {
   emailEnabled: process.env.EMAIL_ENABLED === 'true',
@@ -49,10 +50,15 @@ async function notify(event, opts = {}) {
           await log(ticketId, 'email', r.email, event, payload,
             CONFIG.emailEnabled ? 'sent' : 'skipped');
         } else if (channel === 'whatsapp') {
-          if (CONFIG.whatsappEnabled && r.phone && CONFIG.fonnteToken) {
-            // Intentionally NOT sending in prototype. Wire real Fonnte call here:
-            //   await fetch(CONFIG.fonnteEndpoint, { method:'POST', headers:{Authorization:CONFIG.fonnteToken}, ... })
-            await log(ticketId, 'whatsapp', r.phone, event, payload, 'sent');
+          if (CONFIG.whatsappEnabled && r.phone) {
+            // Send real WhatsApp using Fonnte service with dynamic ticket number
+            const ticketNo = opts.ticketNumber || (message.match(/[A-Z]+-\d{4}-\d{4}/) ? message.match(/[A-Z]+-\d{4}-\d{4}/)[0] : 'Unknown');
+            const result = await sendWhatsApp(r.phone, ticketNo);
+            if (result.success) {
+              await log(ticketId, 'whatsapp', r.phone, event, payload, 'sent');
+            } else {
+              await log(ticketId, 'whatsapp', r.phone, event, payload, `failed: ${result.error}`);
+            }
           } else {
             await log(ticketId, 'whatsapp', r.phone, event, payload, 'skipped');
           }

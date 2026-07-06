@@ -159,4 +159,22 @@ router.post(
   },
 );
 
+router.delete(
+  "/api/technicians/:id/unavailability/:uid",
+  requireAuth,
+  requireRole(ADMIN_ROLES),
+  async (req, res) => {
+    const tech = await db.pGet("SELECT id, role FROM users WHERE id = ?", [
+      req.params.id,
+    ]);
+    if (!tech || !canManageTechnician(req.user, tech))
+      return res.status(403).json({ error: "Not permitted" });
+    await db.pRun(
+      "DELETE FROM technician_unavailability WHERE id = ? AND user_id = ?",
+      [req.params.uid, req.params.id],
+    );
+    res.json({ success: true });
+  },
+);
+
 module.exports = router;

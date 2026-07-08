@@ -38,6 +38,7 @@ app.use(require("./src/routes/technicians.routes"));
 app.use(require("./src/routes/reports.routes"));
 app.use(require("./src/routes/users.routes"));
 app.use(require("./src/routes/attachments.routes"));
+app.use(require("./src/routes/public.routes")); // unauthenticated quick-report
 
 // --- Static + SPA ----------------------------------------------------------
 app.use(express.static(path.join(__dirname, "public")));

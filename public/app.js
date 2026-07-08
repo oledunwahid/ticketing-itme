@@ -119,7 +119,7 @@ async function rawFetch(url, opts = {}) {
       if (ok) return fetch(url, { credentials: 'include', ...opts, headers });
       throw new ApiError('Session expired', 401);
     }
-    state.user = null; renderAuth('login');
+    state.user = null; renderAuth();
     throw new ApiError('Unauthorized', 401);
   }
   return res;
@@ -132,9 +132,12 @@ async function apiJSON(url, opts) {
 }
 const api = {
   me: () => apiJSON('/api/auth/me'),
-  login: (email, password) => apiJSON('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  register: (b) => apiJSON('/api/auth/register', { method: 'POST', body: JSON.stringify(b) }),
+  login: (email, password, remember_me = false) => apiJSON('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password, remember_me }) }),
   logout: () => rawFetch('/api/auth/logout', { method: 'POST' }),
+  // Public (no-login) quick-report surface
+  publicMeta: () => apiJSON('/api/public/meta'),
+  publicQuickReport: (b) => apiJSON('/api/public/quick-report', { method: 'POST', body: JSON.stringify(b) }),
+  publicTrack: (num, token) => apiJSON('/api/public/track/' + encodeURIComponent(num) + '?token=' + encodeURIComponent(token)),
   outlets: () => apiJSON('/api/meta/outlets'),
   allOutlets: () => apiJSON('/api/outlets'),
   createOutlet: (b) => apiJSON('/api/outlets', { method: 'POST', body: JSON.stringify(b) }),
@@ -384,10 +387,9 @@ function uploadZoneHTML(id) {
 // ==========================================================================
 // Auth screens
 // ==========================================================================
-function renderAuth(mode) {
+function renderAuth() {
   $('#app-shell').hidden = true;
   const root = $('#auth-root'); root.hidden = false;
-  if (mode === 'register') return renderRegister(root);
   root.innerHTML = `
     <form class="auth-card" id="login-form">
       <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
@@ -395,54 +397,178 @@ function renderAuth(mode) {
       <div class="auth-sub">Report & track operational issues</div>
       <div class="field"><label>Email</label><input type="email" id="li-email" required autocomplete="username"></div>
       <div class="field"><label>Password</label>${pwInput('li-pw', 'required autocomplete="current-password"')}</div>
+      <label class="remember-row"><input type="checkbox" id="li-remember"><span>Remember me on this device</span></label>
       <button class="btn-primary btn-block" id="li-submit">Sign in</button>
-      <div class="auth-switch">No account? <a href="/register" data-nav>Register</a></div>
+      <div class="auth-divider"><span>atau</span></div>
+      <a href="/quick-report" data-nav class="btn-outline btn-block" id="li-quick">Quick Report tanpa login</a>
+      <p class="hint auth-quick-copy">Untuk outlet yang hanya ingin membuat laporan cepat, gunakan Quick Report tanpa login.</p>
     </form>`;
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = $('#li-submit'); btn.disabled = true; btn.textContent = 'Signing in…';
     try {
-      state.user = await api.login($('#li-email').value.trim(), $('#li-pw').value);
+      state.user = await api.login($('#li-email').value.trim(), $('#li-pw').value, $('#li-remember').checked);
       const p = new URLSearchParams(location.search).get('redirect');
       boot(); navigate(p || defaultRoute());
     } catch (err) { toast(err.message || 'Login failed', 'error'); btn.disabled = false; btn.textContent = 'Sign in'; }
   });
 }
-async function renderRegister(root) {
-  let brands = [];
-  try { brands = await api.brands(); } catch (_) {}
-  root.innerHTML = `
-    <form class="auth-card" id="reg-form">
-      <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
-      <div class="auth-title">Create account</div>
-      <div class="auth-sub">For outlet requestors</div>
-      <div class="field"><label>Full name <span class="req-star">*</span></label><input id="rg-name" required></div>
-      <div class="field"><label>Email <span class="req-star">*</span></label><input type="email" id="rg-email" required></div>
-      <div class="field"><label>Brand (optional)</label><select id="rg-brand"><option value="">—</option>${brands.map((b) => `<option value="${esc(b.code)}">${esc(b.code)}</option>`).join('')}</select></div>
-      <div class="field"><label>Password <span class="req-star">*</span></label>${pwInput('rg-pw', 'required autocomplete="new-password"')}</div>
-      <div class="field"><label>Confirm password <span class="req-star">*</span></label>${pwInput('rg-pw2', 'required autocomplete="new-password"')}</div>
-      <div class="checklist" id="rg-ck"></div>
-      <button class="btn-primary btn-block mt" id="rg-submit" disabled>Register</button>
-      <div class="auth-switch">Have an account? <a href="/login" data-nav>Sign in</a></div>
-    </form>`;
-  const reqs = [['len', '10+ characters', (p) => p.length >= 10], ['up', 'Uppercase', (p) => /[A-Z]/.test(p)],
-    ['lo', 'Lowercase', (p) => /[a-z]/.test(p)], ['no', 'Number', (p) => /\d/.test(p)],
-    ['sp', 'Special (!@#$…)', (p) => /[@$!%*?&]/.test(p)], ['mt', 'Passwords match', (p, c) => p && p === c]];
-  const ck = $('#rg-ck'); ck.innerHTML = reqs.map((r) => `<div class="ck" data-r="${r[0]}">✕ ${r[1]}</div>`).join('');
-  const val = () => {
-    const p = $('#rg-pw').value, c = $('#rg-pw2').value; let all = true;
-    reqs.forEach((r) => { const ok = r[2](p, c); const el = $(`[data-r="${r[0]}"]`, ck); el.classList.toggle('met', ok); el.textContent = (ok ? '✓ ' : '✕ ') + r[1]; if (!ok) all = false; });
-    $('#rg-submit').disabled = !all;
-  };
-  $('#rg-pw').addEventListener('input', val); $('#rg-pw2').addEventListener('input', val);
-  $('#reg-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const btn = $('#rg-submit'); btn.disabled = true; btn.textContent = 'Registering…';
-    try {
-      await api.register({ username: $('#rg-name').value.trim(), email: $('#rg-email').value.trim(), brand: $('#rg-brand').value, password: $('#rg-pw').value, passwordConfirm: $('#rg-pw2').value });
-      toast('Account created — please sign in', 'success'); navigate('/login');
-    } catch (err) { toast(err.message, 'error'); btn.disabled = false; btn.textContent = 'Register'; }
+
+// ==========================================================================
+// Public Quick Report (no login) — only creates a New ticket
+// ==========================================================================
+async function renderPublicQuickReport() {
+  $('#app-shell').hidden = true;
+  const root = $('#auth-root'); root.hidden = false;
+  root.innerHTML = `<div class="auth-card public-card" id="pq-card"><div class="loading-inline">Memuat formulir…</div></div>`;
+  let meta;
+  try { meta = await api.publicMeta(); }
+  catch (e) { $('#pq-card').innerHTML = `<div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div><h3>Gagal memuat formulir</h3><p class="muted">${esc(e.message || 'Coba lagi.')}</p><a href="/login" data-nav class="btn-outline btn-block mt">← Kembali ke login</a>`; wireNavLinks(); return; }
+
+  const groups = {};
+  (meta.outlets || []).forEach((o) => { (groups[o.brand_code] = groups[o.brand_code] || []).push(o); });
+  const optgroups = Object.entries(groups).map(([b, list]) => `<optgroup label="${esc(b)}">${list.map((o) => `<option value="${esc(o.code)}">${esc(o.code)}${o.region ? ' · ' + esc(o.region) : ''}</option>`).join('')}</optgroup>`).join('');
+
+  $('#pq-card').innerHTML = `
+    <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
+    <div class="auth-title">Quick Report</div>
+    <div class="auth-sub">Laporkan kendala tanpa perlu login</div>
+    <div class="field"><label>Outlet <span class="req-star">*</span></label><select id="pq-outlet"><option value="">Pilih outlet…</option>${optgroups}</select></div>
+    <div class="field"><label>Departemen <span class="req-star">*</span></label>
+      <div class="segmented"><button type="button" class="seg-btn big" data-pqdept="IT">🖥️ IT</button><button type="button" class="seg-btn big" data-pqdept="ME">🔧 Mechanical</button></div></div>
+    <div class="field"><label>Kategori <span class="req-star">*</span></label><select id="pq-cat" disabled><option>Pilih departemen dulu</option></select></div>
+    <div class="field"><label>Deskripsi masalah <span class="req-star">*</span></label><textarea id="pq-desc" placeholder="mis. printer kasir 2 tidak keluar struk"></textarea></div>
+    <div class="field-row">
+      <div class="field"><label>Nama pelapor <span class="req-star">*</span></label><input id="pq-name" placeholder="Nama Anda"></div>
+      <div class="field"><label>WhatsApp / kontak <span class="req-star">*</span></label><input id="pq-contact" placeholder="08xx…" inputmode="tel"></div>
+    </div>
+    <div class="field"><label>Urgensi (opsional)</label><div class="segmented" id="pq-urg">${URGENCIES.map((u) => `<button type="button" class="seg-btn ${u === 'Medium' ? 'active' : ''}" data-pqurg="${u}">${u}</button>`).join('')}</div></div>
+    <div class="field"><label>Lokasi di dalam outlet (opsional)</label><input id="pq-loc" placeholder="mis. area kasir depan"></div>
+    <div class="field"><label>Foto / video (opsional)</label>
+      <input type="file" id="pq-file" accept="image/*,video/*" multiple>
+      <div class="pq-uploads" id="pq-uplist"></div>
+    </div>
+    <button type="button" class="btn-primary btn-block" id="pq-submit">Kirim laporan</button>
+    <a href="/login" data-nav class="auth-switch" style="display:block;text-align:center">← Kembali ke login</a>`;
+  wireNavLinks();
+
+  let dept = '';
+  $$('[data-pqdept]').forEach((b) => b.addEventListener('click', () => {
+    dept = b.dataset.pqdept;
+    $$('[data-pqdept]').forEach((x) => x.classList.toggle('active', x === b));
+    const sel = $('#pq-cat'); const list = (meta.categories && meta.categories[dept]) || [];
+    sel.innerHTML = '<option value="">Pilih kategori…</option>' + list.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    sel.disabled = false;
+  }));
+  let urg = 'Medium';
+  $$('[data-pqurg]').forEach((b) => b.addEventListener('click', () => { urg = b.dataset.pqurg; $$('[data-pqurg]').forEach((x) => x.classList.toggle('active', x === b)); }));
+
+  // Lightweight public uploader — posts each file to /api/public/upload.
+  const uploadedIds = [];
+  let uploading = 0;
+  $('#pq-file').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    for (const f of files) {
+      if (uploadedIds.length >= 5) { toast('Maksimal 5 file', 'error'); break; }
+      const row = document.createElement('div'); row.className = 'pq-uprow'; row.textContent = '⏳ ' + f.name;
+      $('#pq-uplist').appendChild(row);
+      uploading++;
+      try {
+        const fd = new FormData(); fd.append('file', f);
+        const res = await rawFetch('/api/public/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload gagal');
+        uploadedIds.push(data.id); row.textContent = '✓ ' + f.name;
+      } catch (err) { row.textContent = '✕ ' + f.name + ' — ' + err.message; row.classList.add('err'); toast(err.message, 'error'); }
+      finally { uploading--; }
+    }
   });
+
+  const submit = $('#pq-submit');
+  let submitted = false;
+  submit.addEventListener('click', async () => {
+    if (submitted) return;
+    const outlet = $('#pq-outlet').value, cat = $('#pq-cat').value, desc = $('#pq-desc').value.trim();
+    const name = $('#pq-name').value.trim(), contact = $('#pq-contact').value.trim();
+    if (!outlet) return toast('Pilih outlet', 'error');
+    if (!dept) return toast('Pilih IT atau Mechanical', 'error');
+    if (!cat) return toast('Pilih kategori', 'error');
+    if (!desc) return toast('Isi deskripsi masalah', 'error');
+    if (!name) return toast('Isi nama pelapor', 'error');
+    if (!contact) return toast('Isi nomor WhatsApp / kontak', 'error');
+    if (uploading > 0) return toast('Tunggu unggahan selesai', 'error');
+    submitted = true; submit.disabled = true; submit.textContent = 'Mengirim…';
+    try {
+      const r = await api.publicQuickReport({
+        department: dept, outlet_code: outlet, category: cat, description: desc,
+        reporter_name: name, contact_number: contact, urgency: urg,
+        location_detail: $('#pq-loc').value.trim(), attachmentIds: uploadedIds,
+      });
+      renderPublicSuccess(r);
+    } catch (e) {
+      submitted = false; submit.disabled = false; submit.textContent = 'Kirim laporan';
+      toast(e.message || 'Gagal mengirim', 'error');
+    }
+  });
+}
+
+function renderPublicSuccess(r) {
+  const trackUrl = location.origin + (r.track_url || '');
+  $('#pq-card').innerHTML = `
+    <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
+    <div class="pq-success">
+      <div class="pq-check">✓</div>
+      <h3>Ticket ${esc(r.ticket_number)} berhasil dibuat</h3>
+      <p class="muted">Tim terkait akan menindaklanjuti laporan Anda.</p>
+      <div class="pq-ticketno">${esc(r.ticket_number)}</div>
+      ${r.tracking_token ? `<label class="hint" style="margin-top:12px">Simpan link untuk melacak status:</label>
+      <div class="pq-track"><input id="pq-trackurl" readonly value="${esc(trackUrl)}"><button class="btn-outline" id="pq-copy">Salin</button></div>` : ''}
+      <div class="row gap-sm mt" style="justify-content:center">
+        <a href="/quick-report" data-nav class="btn-outline">Laporan baru</a>
+        <a href="/login" data-nav class="btn-ghost">Login</a>
+      </div>
+    </div>`;
+  wireNavLinks();
+  const copyBtn = $('#pq-copy');
+  if (copyBtn) copyBtn.addEventListener('click', () => {
+    const inp = $('#pq-trackurl'); inp.select();
+    try { navigator.clipboard.writeText(inp.value); toast('Link disalin', 'success'); }
+    catch (_) { document.execCommand('copy'); toast('Link disalin', 'success'); }
+  });
+}
+
+// ==========================================================================
+// Public ticket tracking (token-gated, public-safe fields only)
+// ==========================================================================
+async function renderPublicTrack(ticketNumber) {
+  $('#app-shell').hidden = true;
+  const root = $('#auth-root'); root.hidden = false;
+  const token = new URLSearchParams(location.search).get('token') || '';
+  root.innerHTML = `<div class="auth-card public-card" id="pt-card"><div class="loading-inline">Melacak tiket…</div></div>`;
+  if (!ticketNumber || !token) {
+    $('#pt-card').innerHTML = `<div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div><h3>Link pelacakan tidak valid</h3><p class="muted">Token pelacakan diperlukan.</p><a href="/login" data-nav class="btn-outline btn-block mt">← Ke login</a>`;
+    wireNavLinks(); return;
+  }
+  try {
+    const t = await api.publicTrack(ticketNumber, token);
+    $('#pt-card').innerHTML = `
+      <div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div>
+      <div class="auth-title">Status Tiket</div>
+      <div class="pq-ticketno" style="margin:10px 0">${esc(t.ticket_number)}</div>
+      <dl class="info-list">
+        <dt>Status</dt><dd>${badge(t.status)}</dd>
+        <dt>Departemen</dt><dd>${deptTag(t.department)}</dd>
+        <dt>Outlet</dt><dd>${esc(t.outlet || '—')}${t.region ? ' · ' + esc(t.region) : ''}</dd>
+        <dt>Dibuat</dt><dd>${fmtDate(t.created_at)}</dd>
+        <dt>Update terakhir</dt><dd>${fmtDate(t.last_update_at)}</dd>
+      </dl>
+      <a href="/quick-report" data-nav class="btn-outline btn-block mt">Buat laporan baru</a>`;
+    wireNavLinks();
+  } catch (e) {
+    $('#pt-card').innerHTML = `<div class="auth-brand"><div class="brand-mark">IM</div><span class="brand-text">IT-ME Ticketing</span></div><h3>Tiket tidak ditemukan</h3><p class="muted">${esc(e.message || 'Token tidak valid.')}</p><a href="/login" data-nav class="btn-outline btn-block mt">← Ke login</a>`;
+    wireNavLinks();
+  }
 }
 
 // ==========================================================================
@@ -494,11 +620,15 @@ window.addEventListener('popstate', route);
 
 async function route() {
   const path = location.pathname;
-  if (!state.user) {
-    if (path === '/register') return renderAuth('register');
-    return renderAuth('login');
-  }
   const parts = path.split('/').filter(Boolean);
+  // --- Public (no-login) routes — reachable whether or not signed in ---
+  if (parts[0] === 'quick-report' || parts[0] === 'report') return renderPublicQuickReport();
+  if (parts[0] === 'track') return renderPublicTrack(parts[1] || '');
+  if (!state.user) {
+    // Public register is removed — send any /register hit to the login screen.
+    if (path === '/register') history.replaceState(null, '', '/login');
+    return renderAuth();
+  }
   let name = parts[0] || defaultRoute().slice(1);
   const id = parts[1] || null;
 
@@ -697,10 +827,11 @@ async function loadTicketList() {
 }
 function ticketRow(t) {
   const sched = t.status === 'On Scheduled' && t.scheduled_at ? `<span class="sched-chip">📅 ${fmtDate(t.scheduled_at)}</span>` : '';
+  const pub = t.source === 'public_quick_report' ? '<span class="src-chip">Public</span>' : '';
   return `<div class="ticket-row" data-id="${t.id}">
     <div>${deptTag(t.department)}</div>
     <div style="min-width:0">
-      <div class="tnum">${esc(t.ticket_number || '#' + t.id)}</div>
+      <div class="tnum">${esc(t.ticket_number || '#' + t.id)}${pub}</div>
       <div class="ttitle">${esc(t.title)}</div>
       <div class="tmeta"><span>${esc(t.outlet_code || '—')}${t.region ? ' · ' + esc(t.region) : ''}</span><span>${esc(t.category || '')}</span><span>${esc(t.assignee_name && t.assignee_name !== 'Unassigned' ? '👤 ' + t.assignee_name : 'Unassigned')}</span>${sched}<span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div>
     </div>
@@ -757,15 +888,16 @@ async function renderTicketDetail(id) {
         <h2>${esc(t.title)}</h2>
         <div class="aging ${agingClass(t)}">Reported ${fmtDate(t.created_at)} · ${timeAgo(t.created_at)}</div>
       </div>
-      <div class="detail-badges">${urgBadge(t.urgency)}${badge(t.status)}</div>
+      <div class="detail-badges">${urgBadge(t.urgency)}${badge(t.status)}${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
     </div>
     <div class="detail-grid">
       <div>
         <div class="card mb">
           <dl class="info-list">
             <dt>Outlet</dt><dd>${esc(t.outlet_code || '—')} ${t.brand_code ? '· ' + esc(t.brand_code) : ''}</dd>
-            <dt>Requester</dt><dd>${esc(t.customer_name || '—')}</dd>
-            <dt>Contact</dt><dd>${esc(t.contact_number || '—')}</dd>
+            ${t.source === 'public_quick_report' ? '<dt>Source</dt><dd><span class="badge src-public">Public Quick Report</span></dd>' : ''}
+            <dt>${t.source === 'public_quick_report' ? 'Reporter' : 'Requester'}</dt><dd>${esc(t.public_reporter_name || t.customer_name || '—')}</dd>
+            <dt>Contact</dt><dd>${esc(t.public_reporter_contact || t.contact_number || '—')}</dd>
             <dt>Assignee</dt><dd>${esc(t.assignee_name || 'Unassigned')}</dd>
             ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
             ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}

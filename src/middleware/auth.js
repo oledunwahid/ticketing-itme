@@ -32,9 +32,20 @@ function rateLimit({ windowMs, max }) {
   };
 }
 
+// --- Session durations -----------------------------------------------------
+// Normal session ~12h; "Remember me" ~14 days. These bound both the JWT's
+// absolute expiry and the cookie maxAge (the cookie slides on each request but
+// never past the token's absolute_exp).
+const SESSION_MS = {
+  normal: 12 * 60 * 60 * 1000, //     12 hours
+  remember: 14 * 24 * 60 * 60 * 1000, // 14 days
+};
+const sessionMs = (rememberMe) =>
+  rememberMe ? SESSION_MS.remember : SESSION_MS.normal;
+
 // --- Auth helpers ----------------------------------------------------------
-function signToken(user) {
-  const absoluteExp = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+function signToken(user, rememberMe = false) {
+  const absoluteExp = Math.floor((Date.now() + sessionMs(rememberMe)) / 1000);
   return jwt.sign(
     {
       id: user.id,
@@ -45,17 +56,18 @@ function signToken(user) {
       brand: user.brand,
       all_brands: user.all_brands,
       can_close_override: user.can_close_override,
+      remember: !!rememberMe,
       absolute_exp: absoluteExp,
     },
     JWT_SECRET,
   );
 }
-function setSessionCookie(res, token) {
+function setSessionCookie(res, token, rememberMe = false) {
   res.cookie("token", token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
-    maxAge: 30 * 60 * 1000,
+    maxAge: sessionMs(rememberMe),
   });
 }
 
@@ -77,7 +89,7 @@ function requireAuth(req, res, next) {
         .status(401)
         .json({ error: "Unauthorized. Session absolute lifetime expired." });
     }
-    setSessionCookie(res, token); // sliding window
+    setSessionCookie(res, token, !!decoded.remember); // sliding window
     req.user = decoded;
     next();
   });

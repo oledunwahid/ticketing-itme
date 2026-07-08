@@ -634,6 +634,28 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .insight-list li::before { content: "▸"; position: absolute; left: 4px; color: var(--primary); }
 .insight-list li.muted::before { content: ""; }
 
+/* --- Login "Remember me" + Quick Report link --- */
+.remember-row { display: flex; align-items: center; gap: 8px; font-size: 0.86rem; color: var(--text-2); margin: 2px 0 12px; cursor: pointer; }
+.remember-row input { width: 16px; height: 16px; accent-color: var(--primary); }
+.auth-divider { display: flex; align-items: center; gap: 10px; margin: 16px 0 12px; color: var(--text-muted); font-size: 0.78rem; }
+.auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.auth-quick-copy { text-align: center; margin-top: 10px; }
+
+/* --- Public Quick Report page --- */
+.public-card { max-width: 480px; }
+.pq-uploads { display: grid; gap: 4px; margin-top: 8px; }
+.pq-uprow { font-size: 0.8rem; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; }
+.pq-uprow.err { color: var(--danger); }
+.pq-success { text-align: center; padding: 8px 4px; }
+.pq-check { width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 50%; background: rgba(16,185,129,.15); color: var(--ok); font-size: 30px; display: flex; align-items: center; justify-content: center; }
+.pq-ticketno { font-size: 1.35rem; font-weight: 800; letter-spacing: .04em; color: var(--primary); text-align: center; }
+.pq-track { display: flex; gap: 6px; margin-top: 6px; }
+.pq-track input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 9px 11px; font-size: 0.8rem; }
+
+/* --- Public-source badges / chips --- */
+.badge.src-public { background: rgba(59,130,246,.16); color: var(--info); }
+.src-chip { display: inline-block; margin-left: 8px; padding: 1px 7px; font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; border-radius: 999px; background: rgba(59,130,246,.16); color: var(--info); vertical-align: middle; }
+
 /* --- Print-friendly report --- */
 @media print {
   .no-print, .sidebar, .topbar, .bottom-nav, #toast-container, .drawer-overlay { display: none !important; }

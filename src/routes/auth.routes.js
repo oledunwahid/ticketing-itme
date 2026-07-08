@@ -12,13 +12,18 @@ const {
   signToken,
   setSessionCookie,
   requireAuth,
+  requireRole,
 } = require("../middleware/auth");
 
 const router = express.Router();
 
+// Public self-registration is DISABLED. Accounts are created only by
+// SuperAdmin/Admin via User Management (POST /api/users). This legacy endpoint
+// is kept but locked behind admin auth so no unauthenticated user can register.
 router.post(
   "/api/auth/register",
-  rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }),
+  requireAuth,
+  requireRole("SuperAdmin", "AdminIT", "AdminME"),
   async (req, res) => {
     try {
       const {
@@ -139,8 +144,12 @@ router.post(
         "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?",
         [user.id],
       );
-      const token = signToken(user);
-      setSessionCookie(res, token);
+      const rememberMe =
+        req.body.remember_me === true ||
+        req.body.remember_me === "true" ||
+        req.body.rememberMe === true;
+      const token = signToken(user, rememberMe);
+      setSessionCookie(res, token, rememberMe);
       res.json({
         id: user.id,
         username: user.username,

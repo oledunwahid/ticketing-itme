@@ -654,6 +654,24 @@ async function runMigrations() {
       await run("UPDATE users SET pic_area = COALESCE(pic_area, 'PIC Area') WHERE id = ?", [t.id]);
     }
   });
+
+  // m014 — Public Quick Report support. Additive & data-preserving:
+  //   • tickets.source                    'authenticated' | 'public_quick_report'
+  //   • tickets.public_reporter_name      reporter name for login-less tickets
+  //   • tickets.public_reporter_contact   reporter WhatsApp/phone
+  //   • tickets.tracking_token_hash       sha256 of the (unstored) tracking token
+  //   • tickets.tracking_token_created_at when the token was issued
+  // Existing tickets are backfilled to source='authenticated'.
+  await migrate('m014_public_quick_report', async () => {
+    await addColumn('tickets', 'source', "TEXT DEFAULT 'authenticated'");
+    await addColumn('tickets', 'public_reporter_name', 'TEXT');
+    await addColumn('tickets', 'public_reporter_contact', 'TEXT');
+    await addColumn('tickets', 'tracking_token_hash', 'TEXT');
+    await addColumn('tickets', 'tracking_token_created_at', 'DATETIME');
+    await run("UPDATE tickets SET source = 'authenticated' WHERE source IS NULL OR source = ''");
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_source ON tickets(source)');
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_track ON tickets(tracking_token_hash)');
+  });
 }
 
 // --- Demo seed (fresh installs only) --------------------------------------

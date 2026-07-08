@@ -55,8 +55,24 @@ async function getUserScope(user) {
   return { allBrands: false, brands, outlets };
 }
 
+// Technician PIC scope: their assigned PIC outlets + whether they have broad
+// (all-outlet) access. Loaded from DB because the JWT does not carry these.
+async function getTechnicianScope(user) {
+  const row = await db.pGet("SELECT all_outlets FROM users WHERE id = ?", [
+    user.id,
+  ]);
+  const allOutlets = !!(row && row.all_outlets);
+  const picOutlets = (
+    await db.pAll("SELECT outlet_code FROM user_outlet_access WHERE user_id = ?", [
+      user.id,
+    ])
+  ).map((r) => r.outlet_code);
+  return { allOutlets, picOutlets };
+}
+
 // Build a WHERE clause fragment scoping the tickets table to what `user` may see.
-async function buildTicketScope(user) {
+// opts.techFilter (technicians only): 'pic' (default) | 'mine' | 'unassigned_pic' | 'all'
+async function buildTicketScope(user, opts = {}) {
   const clauses = [];
   const params = [];
 
@@ -69,8 +85,40 @@ async function buildTicketScope(user) {
     clauses.push("(requestor_user_id = ? OR LOWER(customer_email) = LOWER(?))");
     params.push(user.id, user.email);
   } else if (isTechnician(user)) {
-    clauses.push("assigned_technician_id = ?");
-    params.push(user.id);
+    // Technicians are always capped to their department...
+    clauses.push("department = ?");
+    params.push(dept);
+
+    // ...then scoped by their PIC outlet coverage / self-assignment, with a
+    // selectable filter. This is the hard cap — the frontend cannot exceed it.
+    const { allOutlets, picOutlets } = await getTechnicianScope(user);
+    const filter = opts.techFilter || "pic";
+    const picIn = picOutlets.length
+      ? `outlet_code IN (${picOutlets.map(() => "?").join(",")})`
+      : "0"; // no PIC outlets configured → PIC clause matches nothing
+    const mine = "assigned_technician_id = ?";
+
+    if (filter === "mine") {
+      clauses.push(mine);
+      params.push(user.id);
+    } else if (filter === "unassigned_pic") {
+      clauses.push(`(${picIn}) AND assigned_technician_id IS NULL`);
+      if (picOutlets.length) params.push(...picOutlets);
+    } else if (filter === "all") {
+      // "All allowed" = whole department only if granted all-outlet access;
+      // otherwise still capped to PIC outlets + own assignments.
+      if (!allOutlets) {
+        clauses.push(`((${picIn}) OR ${mine})`);
+        if (picOutlets.length) params.push(...picOutlets);
+        params.push(user.id);
+      }
+    } else {
+      // 'pic' (default): PIC outlets OR tickets assigned to me (so a tech never
+      // loses sight of their own jobs even outside their PIC coverage).
+      clauses.push(`((${picIn}) OR ${mine})`);
+      if (picOutlets.length) params.push(...picOutlets);
+      params.push(user.id);
+    }
   } else if (user.role === "AdminIT" || user.role === "AdminME") {
     clauses.push("department = ?");
     params.push(dept);
@@ -108,5 +156,6 @@ module.exports = {
   adminScopeForTicket,
   canClose,
   getUserScope,
+  getTechnicianScope,
   buildTicketScope,
 };

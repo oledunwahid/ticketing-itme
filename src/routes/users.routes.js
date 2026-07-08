@@ -22,9 +22,19 @@ router.get(
   requireRole(ADMIN_ROLES),
   async (req, res) => {
     const rows = await db.pAll(
-      `SELECT id, username, email, role, department, brand, all_brands, phone, is_active,
-            can_close_override, default_outlet_code, created_at FROM users ORDER BY id ASC`,
+      `SELECT id, username, email, role, department, brand, all_brands, all_outlets, region,
+            pic_area, phone, is_active, can_close_override, default_outlet_code, created_at
+       FROM users ORDER BY id ASC`,
     );
+    // Attach PIC outlet coverage (used by the user modal / technician scope).
+    for (const u of rows) {
+      u.outlet_access = (
+        await db.pAll(
+          "SELECT outlet_code FROM user_outlet_access WHERE user_id = ?",
+          [u.id],
+        )
+      ).map((r) => r.outlet_code);
+    }
     res.json(rows);
   },
 );
@@ -43,6 +53,9 @@ router.post(
         department,
         brand,
         all_brands,
+        all_outlets,
+        region,
+        pic_area,
         phone,
         is_active,
         can_close_override,
@@ -76,8 +89,8 @@ router.post(
 
       const dept = deptForRole(role);
       const r = await db.pRun(
-        `INSERT INTO users (username, email, password_hash, role, department, brand, all_brands, phone, is_active, can_close_override, default_outlet_code)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (username, email, password_hash, role, department, brand, all_brands, all_outlets, region, pic_area, phone, is_active, can_close_override, default_outlet_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           username,
           email.toLowerCase(),
@@ -86,6 +99,9 @@ router.post(
           department || dept,
           brand || null,
           all_brands ? 1 : 0,
+          all_outlets ? 1 : 0,
+          region || null,
+          pic_area || null,
           phone || null,
           is_active === 0 ? 0 : 1,
           can_close_override ? 1 : 0,
@@ -156,6 +172,10 @@ router.patch(
       }
       if (b.brand !== undefined) set("brand", b.brand || null);
       if (b.all_brands !== undefined) set("all_brands", b.all_brands ? 1 : 0);
+      if (b.all_outlets !== undefined)
+        set("all_outlets", b.all_outlets ? 1 : 0);
+      if (b.region !== undefined) set("region", b.region || null);
+      if (b.pic_area !== undefined) set("pic_area", b.pic_area || null);
       if (b.phone !== undefined) set("phone", b.phone || null);
       if (b.is_active !== undefined) set("is_active", b.is_active ? 1 : 0);
       if (b.can_close_override !== undefined)

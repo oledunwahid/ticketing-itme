@@ -559,6 +559,101 @@ async function runMigrations() {
       );
     }
   });
+
+  // m010 — Region (outlets/tickets/users) + technician PIC & scheduled fields.
+  // All additive & data-preserving. Existing outlets/tickets default to Jakarta;
+  // UTP and UPKW move to Surabaya as requested.
+  await migrate('m010_region_scheduled_pic', async () => {
+    // Outlets: region column, default Jakarta
+    await addColumn('outlets', 'region', "TEXT DEFAULT 'Jakarta'");
+    await run("UPDATE outlets SET region = 'Jakarta' WHERE region IS NULL OR region = ''");
+    await run("UPDATE outlets SET region = 'Surabaya' WHERE code IN ('UTP','UPKW')");
+
+    // Tickets: region (inferred from outlet) + scheduled window for On Scheduled/Event
+    await addColumn('tickets', 'region', 'TEXT');
+    await addColumn('tickets', 'scheduled_at', 'DATETIME');
+    await addColumn('tickets', 'scheduled_end', 'DATETIME');
+    await run(
+      `UPDATE tickets SET region = (
+         SELECT o.region FROM outlets o WHERE o.code = tickets.outlet_code
+       ) WHERE region IS NULL`
+    );
+
+    // Users: broader outlet access flag + region + PIC area label (technician scope)
+    await addColumn('users', 'all_outlets', 'INTEGER DEFAULT 0');
+    await addColumn('users', 'region', 'TEXT');
+    await addColumn('users', 'pic_area', 'TEXT');
+
+    await run('CREATE INDEX IF NOT EXISTS idx_tickets_region ON tickets(region)');
+    await run('CREATE INDEX IF NOT EXISTS idx_outlets_region ON outlets(region)');
+  });
+
+  // m011 — Seed demo technician PIC outlet coverage (mirrors the PDF PIC/area
+  // schedule concept). Idempotent; only assigns outlets that exist. Does not
+  // grant all_outlets, so admins can still widen scope per-technician.
+  await migrate('m011_seed_technician_pic', async () => {
+    const picMap = {
+      'techit1@union.com': ['UPS', 'USC', 'UCP'],       // IT PIC — Area 1
+      'techit2@union.com': ['UGI', 'UPIM', 'UPIK'],     // IT PIC — Area 2
+      'techme1@union.com': ['UMKG', 'USMS', 'UMPI'],    // ME PIC — Area 1
+      'techme2@union.com': ['UTP', 'UPKW'],             // ME PIC — Surabaya
+    };
+    for (const [email, outlets] of Object.entries(picMap)) {
+      const u = await get('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [email]);
+      if (!u) continue;
+      const area = email.includes('me') ? 'ME Area' : 'IT Area';
+      await run('UPDATE users SET pic_area = COALESCE(pic_area, ?) WHERE id = ?', [area, u.id]);
+      for (const oc of outlets) {
+        const o = await get('SELECT 1 FROM outlets WHERE code = ?', [oc]);
+        if (!o) continue;
+        await run(
+          'INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)',
+          [u.id, oc]
+        );
+      }
+    }
+  });
+
+  // m012 — Event category (for scheduled / On Scheduled tickets) in both depts.
+  await migrate('m012_event_category', async () => {
+    await run(
+      "INSERT OR IGNORE INTO categories (department_code, name, sort_order) VALUES ('IT','Event',50)"
+    );
+    await run(
+      "INSERT OR IGNORE INTO categories (department_code, name, sort_order) VALUES ('ME','Event',50)"
+    );
+  });
+
+  // m013 — Give every technician that has no PIC outlet coverage yet a small
+  // default coverage set, so the "default to my PIC outlets" behaviour is
+  // demonstrable on real accounts. Fully editable later via the user modal.
+  await migrate('m013_default_pic_for_technicians', async () => {
+    const techs = await all(
+      "SELECT id, email FROM users WHERE role IN ('TechnicianIT','TechnicianME')"
+    );
+    const pool = (await all("SELECT code FROM outlets WHERE active = 1 ORDER BY code")).map((r) => r.code);
+    if (!pool.length) return;
+    let cursor = 0;
+    for (const t of techs) {
+      const existing = await get(
+        'SELECT COUNT(*) c FROM user_outlet_access WHERE user_id = ?',
+        [t.id]
+      );
+      if (existing.c > 0) continue; // respect any manual configuration
+      const picks = [];
+      for (let i = 0; i < 3 && pool.length; i++) {
+        picks.push(pool[cursor % pool.length]);
+        cursor++;
+      }
+      for (const oc of picks) {
+        await run(
+          'INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)',
+          [t.id, oc]
+        );
+      }
+      await run("UPDATE users SET pic_area = COALESCE(pic_area, 'PIC Area') WHERE id = ?", [t.id]);
+    }
+  });
 }
 
 // --- Demo seed (fresh installs only) --------------------------------------

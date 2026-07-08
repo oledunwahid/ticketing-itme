@@ -28,7 +28,12 @@ const { getVisibleTicket } = require("../services/tickets.service");
 const { validateTransition } = require("../utils/statusTransition");
 const { nextTicketNumber } = require("../utils/ticketNumber");
 const { logActivity } = require("../services/auditLog.service");
-const { DEPARTMENTS, URGENCIES, ADMIN_ROLES } = require("../config/constants");
+const {
+  DEPARTMENTS,
+  URGENCIES,
+  ADMIN_ROLES,
+  SLA_TARGET_MINUTES,
+} = require("../config/constants");
 const {
   recommendTechnicians,
   OPEN_ASSIGNED_STATUSES,
@@ -39,7 +44,6 @@ const router = express.Router();
 
 router.get("/api/tickets", requireAuth, async (req, res) => {
   try {
-    const scope = await buildTicketScope(req.user);
     const {
       status,
       priority,
@@ -47,9 +51,13 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
       department,
       brand,
       outlet,
+      region,
       category,
       search,
+      scope: techFilter,
+      sort,
     } = req.query;
+    const scope = await buildTicketScope(req.user, { techFilter });
     let sql = `SELECT * FROM tickets WHERE ${scope.clause}`;
     const params = [...scope.params];
     const add = (frag, ...vals) => {
@@ -64,6 +72,7 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
       add(" AND department = ?", department);
     if (brand) add(" AND brand_code = ?", brand);
     if (outlet) add(" AND outlet_code = ?", outlet);
+    if (region) add(" AND region = ?", region);
     if (category) add(" AND category = ?", category);
     if (search) {
       add(
@@ -75,7 +84,12 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
         `%${search}%`,
       );
     }
-    sql += ` ORDER BY CASE urgency WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END ASC, created_at DESC`;
+    // Default sort is newest-first (created_at DESC). Urgency ordering is only
+    // applied when explicitly requested — it never controls the default.
+    if (sort === "created_asc") sql += " ORDER BY created_at ASC";
+    else if (sort === "urgency")
+      sql += ` ORDER BY CASE urgency WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END ASC, created_at DESC`;
+    else sql += " ORDER BY created_at DESC"; // default (also 'created_desc')
     res.json(await db.pAll(sql, params));
   } catch (e) {
     console.error(e);
@@ -146,8 +160,18 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
       `SELECT brand_code, COUNT(*) c FROM tickets WHERE ${W} GROUP BY brand_code`,
       P,
     );
+    const byRegion = await db.pAll(
+      `SELECT COALESCE(region,'Jakarta') region, COUNT(*) c FROM tickets WHERE ${W} GROUP BY COALESCE(region,'Jakarta')`,
+      P,
+    );
     const byOutlet = await db.pAll(
       `SELECT outlet_code, COUNT(*) c FROM tickets WHERE ${W} GROUP BY outlet_code ORDER BY c DESC LIMIT 10`,
+      P,
+    );
+    const byTechnician = await db.pAll(
+      `SELECT assignee_name, COUNT(*) c FROM tickets
+       WHERE ${W} AND assigned_technician_id IS NOT NULL
+       GROUP BY assignee_name ORDER BY c DESC LIMIT 10`,
       P,
     );
     const topCategories = await db.pAll(
@@ -157,11 +181,25 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
 
     const total = await one("");
     const open = await one(` AND status NOT IN ('Closed','Cancelled')`);
+    const newCount = await one(` AND status = 'New'`);
     const unassigned = await one(
       ` AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')`,
     );
-    const waiting = await one(
-      ` AND status IN ('Waiting Sparepart','Waiting Vendor')`,
+    const onScheduled = await one(` AND status = 'On Scheduled'`);
+    const onProgress = await one(` AND status = 'On Progress'`);
+    const waitingSparepart = await one(` AND status = 'Waiting Sparepart'`);
+    const waitingVendor = await one(` AND status = 'Waiting Vendor'`);
+    const waiting = waitingSparepart + waitingVendor;
+    const resolved = await one(` AND status = 'Resolved'`);
+    const closed = await one(` AND status = 'Closed'`);
+    const createdToday = await one(
+      ` AND date(created_at) = date('now','localtime')`,
+    );
+    const createdWeek = await one(
+      ` AND date(created_at) >= date('now','localtime','-6 days')`,
+    );
+    const createdMonth = await one(
+      ` AND date(created_at) >= date('now','localtime','start of month')`,
     );
 
     // Avg resolution time (hrs) over resolved/closed with timestamps.
@@ -170,6 +208,32 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
        FROM tickets WHERE ${W} AND (resolved_at IS NOT NULL OR closed_at IS NOT NULL)`,
       P,
     );
+    // Avg first response time (minutes)
+    const fr = await db.pGet(
+      `SELECT AVG((julianday(first_response_at) - julianday(created_at)) * 1440) m
+       FROM tickets WHERE ${W} AND first_response_at IS NOT NULL`,
+      P,
+    );
+
+    // SLA achievement — resolution time vs urgency target (configurable defaults).
+    const slaRows = await db.pAll(
+      `SELECT urgency,
+         (julianday(COALESCE(resolved_at, closed_at)) - julianday(created_at)) * 1440 AS mins
+       FROM tickets
+       WHERE ${W} AND (resolved_at IS NOT NULL OR closed_at IS NOT NULL)`,
+      P,
+    );
+    let slaMet = 0,
+      slaBreached = 0;
+    for (const r of slaRows) {
+      const target = SLA_TARGET_MINUTES[r.urgency] || SLA_TARGET_MINUTES.Medium;
+      if (r.mins != null && r.mins <= target) slaMet++;
+      else slaBreached++;
+    }
+    const slaTotal = slaMet + slaBreached;
+    const slaAchievement = slaTotal
+      ? Math.round((slaMet / slaTotal) * 1000) / 10
+      : null;
 
     // Technician workload (admins only)
     let workload = [];
@@ -201,13 +265,37 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
 
     res.json({
       role: req.user.role,
-      totals: { total, open, unassigned, waiting },
+      totals: {
+        total,
+        open,
+        new: newCount,
+        unassigned,
+        on_scheduled: onScheduled,
+        on_progress: onProgress,
+        waiting_sparepart: waitingSparepart,
+        waiting_vendor: waitingVendor,
+        waiting,
+        resolved,
+        closed,
+        created_today: createdToday,
+        created_week: createdWeek,
+        created_month: createdMonth,
+      },
       avg_resolution_hours: avg && avg.h ? Math.round(avg.h * 10) / 10 : null,
+      avg_first_response_mins: fr && fr.m ? Math.round(fr.m) : null,
+      sla: {
+        met: slaMet,
+        breached: slaBreached,
+        achievement: slaAchievement,
+        targets: SLA_TARGET_MINUTES,
+      },
       byStatus,
       byUrgency,
       byDept,
       byBrand,
+      byRegion,
       byOutlet,
+      byTechnician,
       topCategories,
       workload,
     });
@@ -344,6 +432,7 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
     if (b.status && b.status !== ticket.status) {
       // Technicians limited to a safe subset.
       const techAllowed = [
+        "On Scheduled",
         "On Progress",
         "Waiting Sparepart",
         "Waiting Vendor",
@@ -366,6 +455,9 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
 
       set("status", b.status);
       const nowIso = new Date().toISOString();
+      // On Scheduled: record the planned schedule date/time if supplied.
+      if (b.status === "On Scheduled" && b.scheduled_at)
+        set("scheduled_at", b.scheduled_at);
       if (b.status === "On Progress" && !ticket.started_at)
         set("started_at", nowIso);
       if (b.status === "Resolved" && !ticket.resolved_at)
@@ -427,12 +519,14 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
     if (b.outlet_code && b.outlet_code !== ticket.outlet_code) {
       if (!isDeptAdmin)
         return res.status(403).json({ error: "Only admins can change outlet" });
-      const o = await db.pGet("SELECT brand_code FROM outlets WHERE code = ?", [
-        b.outlet_code,
-      ]);
+      const o = await db.pGet(
+        "SELECT brand_code, region FROM outlets WHERE code = ?",
+        [b.outlet_code],
+      );
       if (!o) return res.status(400).json({ error: "Unknown outlet" });
       set("outlet_code", b.outlet_code);
       set("brand_code", o.brand_code);
+      set("region", o.region || "Jakarta");
       activities.push([
         "outlet.changed",
         `${ticket.outlet_code} → ${b.outlet_code}`,
@@ -452,6 +546,8 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
       "business_impact",
       "contact_number",
       "preferred_visit_time",
+      "scheduled_at",
+      "scheduled_end",
     ];
     for (const f of textFields) {
       if (b[f] !== undefined && b[f] !== ticket[f]) set(f, b[f]);
@@ -559,6 +655,76 @@ router.post(
   },
 );
 
+// --- Self-assignment (technicians) -----------------------------------------
+// A technician takes ownership of a ticket in their department + allowed scope.
+// Enforced entirely server-side (frontend button visibility is a convenience).
+router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
+  try {
+    if (!isTechnician(req.user))
+      return res
+        .status(403)
+        .json({ error: "Only technicians can self-assign tickets" });
+
+    // Visible against the technician's BROADEST allowed scope (dept + PIC/all).
+    const ticket = await getVisibleTicket(req.user, req.params.id, {
+      techFilter: "all",
+    });
+    if (!ticket)
+      return res
+        .status(404)
+        .json({ error: "Ticket not found or outside your allowed scope" });
+
+    const techDept = deptForRole(req.user.role);
+    if (ticket.department !== techDept)
+      return res
+        .status(403)
+        .json({ error: "You can only take tickets in your own department" });
+
+    if (["Closed", "Cancelled"].includes(ticket.status))
+      return res
+        .status(400)
+        .json({ error: "This ticket is already closed or cancelled" });
+
+    if (ticket.assigned_technician_id === req.user.id)
+      return res
+        .status(400)
+        .json({ error: "This ticket is already assigned to you" });
+
+    // Close any previous active assignment, open a new one for me.
+    await db.pRun(
+      "UPDATE ticket_assignments SET active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND active = 1",
+      [ticket.id],
+    );
+    await db.pRun(
+      "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason) VALUES (?, ?, ?, ?)",
+      [ticket.id, req.user.id, req.user.id, "self-assignment"],
+    );
+
+    const newStatus = ["New", "Open"].includes(ticket.status)
+      ? "Assigned"
+      : ticket.status;
+    await db.pRun(
+      `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, status = ?,
+         assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
+         first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [req.user.id, req.user.username, newStatus, ticket.id],
+    );
+    await logActivity(
+      ticket.id,
+      req.user,
+      "ticket.assigned",
+      `Assigned to ${req.user.username} by self-assignment`,
+    );
+
+    res.json(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to self-assign ticket" });
+  }
+});
+
 // --- Create ticket ---------------------------------------------------------
 // double-submit guard (very short window)
 const recentCreates = new Map();
@@ -590,13 +756,14 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
           error: `Category "${b.category}" does not belong to ${department}`,
         });
 
-    // Derive brand from outlet.
+    // Derive brand + region from outlet.
     const outlet = await db.pGet(
-      "SELECT code, brand_code FROM outlets WHERE code = ?",
+      "SELECT code, brand_code, region FROM outlets WHERE code = ?",
       [b.outlet_code],
     );
     if (!outlet) return res.status(400).json({ error: "Unknown outlet" });
     const brand_code = outlet.brand_code || null;
+    const region = outlet.region || "Jakarta";
 
     const urgency = URGENCIES.includes(b.urgency) ? b.urgency : "Medium";
     const reportMode = b.report_mode === "detailed" ? "detailed" : "quick";
@@ -635,11 +802,11 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
 
     const r = await db.pRun(
       `INSERT INTO tickets
-        (ticket_number, title, description, department, category, outlet_code, brand_code,
+        (ticket_number, title, description, department, category, outlet_code, brand_code, region,
          status, urgency, report_mode, requestor_user_id, customer_name, customer_email,
          contact_person, contact_number, location_detail, device_equipment, business_impact,
-         preferred_visit_time, occurrence_at, assignee_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unassigned')`,
+         preferred_visit_time, occurrence_at, scheduled_at, scheduled_end, assignee_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unassigned')`,
       [
         ticketNumber,
         title,
@@ -648,6 +815,7 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
         b.category,
         outlet.code,
         brand_code,
+        region,
         urgency,
         reportMode,
         req.user.id,
@@ -660,6 +828,8 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
         b.business_impact || null,
         b.preferred_visit_time || null,
         b.occurrence_at || null,
+        b.scheduled_at || null,
+        b.scheduled_end || null,
       ],
     );
     const ticketId = r.lastID;

@@ -8,9 +8,11 @@
 const db = require("../../database");
 const { buildTicketScope } = require("../utils/permissions");
 
-// fetch a ticket the user is allowed to see, or null
-async function getVisibleTicket(user, id) {
-  const scope = await buildTicketScope(user);
+// fetch a ticket the user is allowed to see, or null.
+// opts is forwarded to buildTicketScope (e.g. { techFilter: 'all' } to check a
+// ticket against a technician's broadest allowed scope for self-assignment).
+async function getVisibleTicket(user, id, opts = {}) {
+  const scope = await buildTicketScope(user, opts);
   return db.pGet(`SELECT * FROM tickets WHERE id = ? AND ${scope.clause}`, [
     id,
     ...scope.params,

@@ -4,10 +4,11 @@
 'use strict';
 
 // ---- Domain constants (mirror backend) ----
-const STATUSES = ['New', 'Open', 'Assigned', 'On Progress', 'Waiting Sparepart',
+const STATUSES = ['New', 'Open', 'Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart',
   'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'];
 const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
-const TECH_STATUSES = ['On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
+const REGIONS = ['Jakarta', 'Surabaya'];
+const TECH_STATUSES = ['On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
 const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
@@ -25,7 +26,7 @@ const NAV_META = {
   tickets: { label: 'Tickets', icon: 'ticket' },
   queue: { label: 'Queue', icon: 'inbox' },
   schedules: { label: 'Schedules', icon: 'calendar' },
-  reports: { label: 'Reports', icon: 'chart' },
+  reports: { label: 'Reporting & Performance', icon: 'chart' },
   users: { label: 'Users', icon: 'users' },
   categories: { label: 'Categories', icon: 'tag' },
   locations: { label: 'Locations', icon: 'mapPin' },
@@ -151,6 +152,7 @@ const api = {
   patchTicket: (id, b) => apiJSON('/api/tickets/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
   recommend: (id) => apiJSON('/api/tickets/' + id + '/recommend'),
   assign: (id, b) => apiJSON('/api/tickets/' + id + '/assign', { method: 'POST', body: JSON.stringify(b) }),
+  assignToMe: (id) => apiJSON('/api/tickets/' + id + '/assign-to-me', { method: 'POST', body: JSON.stringify({}) }),
   comment: (id, b) => apiJSON('/api/tickets/' + id + '/comments', { method: 'POST', body: JSON.stringify(b) }),
   technicians: (dept) => apiJSON('/api/technicians' + (dept ? '?department=' + dept : '')),
   schedules: (id) => apiJSON('/api/technicians/' + id + '/schedules'),
@@ -160,6 +162,7 @@ const api = {
   delUnavail: (id, uid) => apiJSON('/api/technicians/' + id + '/unavailability/' + uid, { method: 'DELETE' }),
   dashboard: () => apiJSON('/api/dashboard'),
   report: (qs) => apiJSON('/api/reports/tickets' + (qs ? '?' + qs : '')),
+  performance: (qs) => apiJSON('/api/reports/performance' + (qs ? '?' + qs : '')),
   users: () => apiJSON('/api/users'),
   createUser: (b) => apiJSON('/api/users', { method: 'POST', body: JSON.stringify(b) }),
   patchUser: (id, b) => apiJSON('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
@@ -224,6 +227,10 @@ function formModal(title, fields, submitLabel = 'Save') {
       let input;
       if (f.type === 'textarea') input = `<textarea id="${id}" rows="${f.rows || 3}" placeholder="${esc(f.placeholder || '')}">${esc(f.value || '')}</textarea>`;
       else if (f.type === 'select') input = `<select id="${id}">${f.options.map((o) => `<option value="${esc(o.value)}" ${o.value === f.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
+      else if (f.type === 'multiselect') {
+        const sel = Array.isArray(f.value) ? f.value : [];
+        input = `<div class="multiselect-box" id="${id}">${f.options.length ? f.options.map((o) => `<label class="ms-opt"><input type="checkbox" value="${esc(o.value)}" ${sel.includes(o.value) ? 'checked' : ''}> ${esc(o.label)}</label>`).join('') : '<span class="muted">No options</span>'}</div>`;
+      }
       else if (f.type === 'checkbox') input = `<label class="row gap-sm" style="cursor:pointer"><input type="checkbox" id="${id}" ${f.value ? 'checked' : ''} style="width:auto"> ${esc(f.checkboxLabel || '')}</label>`;
       else if (f.type === 'password') input = pwInput(id, `value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}"`);
       else input = `<input type="${f.type || 'text'}" id="${id}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}">`;
@@ -238,8 +245,10 @@ function formModal(title, fields, submitLabel = 'Save') {
           const vals = {};
           for (const f of fields) {
             const el = $('#fm_' + f.name, ov);
-            vals[f.name] = f.type === 'checkbox' ? el.checked : el.value.trim();
-            if (f.required && !vals[f.name]) { toast(`${f.label} is required`, 'error'); el.focus(); return; }
+            if (f.type === 'checkbox') vals[f.name] = el.checked;
+            else if (f.type === 'multiselect') vals[f.name] = $$('input[type=checkbox]', el).filter((c) => c.checked).map((c) => c.value);
+            else vals[f.name] = el.value.trim();
+            if (f.required && (f.type === 'multiselect' ? !vals[f.name].length : !vals[f.name])) { toast(`${f.label} is required`, 'error'); el.focus && el.focus(); return; }
           }
           close(); resolve(vals);
         });
@@ -553,14 +562,31 @@ async function renderDashboard() {
     <div class="stat-grid" id="d-stats">${skeletonStats()}</div><div id="d-rest"></div>`;
   try {
     const d = await api.dashboard();
+    const T = d.totals;
     $('#d-stats').innerHTML = `
-      ${statCard(d.totals.total, 'Total tickets', 'primary')}
-      ${statCard(d.totals.open, 'Open', 'warn')}
-      ${statCard(d.totals.unassigned, 'Unassigned', 'danger')}
-      ${statCard(d.totals.waiting, 'Waiting parts/vendor')}
+      ${statCard(T.total, 'Total tickets', 'primary')}
+      ${statCard(T.open, 'Open', 'warn')}
+      ${statCard(T.unassigned, 'Unassigned', 'danger')}
+      ${statCard(T.on_scheduled || 0, 'On Scheduled')}
+      ${statCard(T.waiting, 'Waiting parts/vendor')}
       ${statCard(d.avg_resolution_hours != null ? d.avg_resolution_hours + 'h' : '—', 'Avg resolution', 'ok')}`;
     animateCounters($('#d-stats'));
     const distMax = Math.max(1, ...d.byStatus.map((s) => s.c));
+    // Dashboard stays glanceable: a compact SLA snapshot only. The full SLA/KPI
+    // analysis, technician performance and manager insights live in the
+    // Reporting & Performance module (link below).
+    const canReport = ['SuperAdmin', 'AdminIT', 'AdminME', 'Leader'].includes(state.user.role);
+    const kpiSection = canReport ? `
+      <div class="panel mt"><div class="panel-head"><h3>SLA snapshot ${state.user.role !== 'SuperAdmin' ? '<span class="muted" style="font-weight:400">(your department)</span>' : ''}</h3>
+        <button class="btn-outline" id="d-goreport" style="padding:6px 12px">Open Reporting &amp; Performance →</button></div>
+        <div class="stat-grid">
+          ${statCard(d.sla.met, 'SLA met', 'ok')}
+          ${statCard(d.sla.breached, 'SLA breached', 'danger')}
+          ${statCard(d.sla.achievement != null ? d.sla.achievement + '%' : '—', 'SLA achievement', 'primary')}
+          ${statCard(d.avg_resolution_hours != null ? d.avg_resolution_hours + 'h' : '—', 'Avg resolution', 'ok')}
+        </div>
+        <div class="hint" style="padding:0 4px 4px">Full technician rankings, outlet/region analysis, SLA detail &amp; manager insights → Reporting &amp; Performance.</div>
+      </div>` : '';
     $('#d-rest').innerHTML = `
       <div class="grid-2">
         <div class="panel"><div class="panel-head"><h3>By status</h3></div><div class="card" style="border:none">
@@ -568,18 +594,25 @@ async function renderDashboard() {
         </div></div>
         <div class="panel"><div class="panel-head"><h3>By department</h3></div><div class="card" style="border:none">
           ${d.byDept.filter((x) => x.department).map((s) => `<div class="dist-row"><span>${deptTag(s.department)}</span><strong>${s.c}</strong></div>`).join('') || '<p class="muted">No data</p>'}
+          <div class="divider"></div><h3 style="font-size:.85rem;margin-bottom:6px">By region</h3>
+          ${(d.byRegion || []).filter((x) => x.region).map((s) => `<div class="dist-row"><span>${esc(s.region)}</span><strong>${s.c}</strong></div>`).join('') || '<p class="muted">No data</p>'}
           <div class="divider"></div><h3 style="font-size:.85rem;margin-bottom:6px">Top outlets</h3>
           ${d.byOutlet.filter((x) => x.outlet_code).slice(0, 6).map((s) => `<div class="dist-row"><span>${esc(s.outlet_code)}</span><strong>${s.c}</strong></div>`).join('') || '<p class="muted">No data</p>'}
         </div></div>
       </div>
+      ${kpiSection}
       <div class="grid-2 mt">
         <div class="panel"><div class="panel-head"><h3>Recurring categories</h3></div><div class="card" style="border:none">
           ${d.topCategories.length ? d.topCategories.map((c) => `<div class="dist-row"><span>${deptTag(c.department)} ${esc(c.category)}</span><strong>${c.c}</strong></div>`).join('') : '<p class="muted">No data</p>'}
         </div></div>
         ${d.workload && d.workload.length ? `<div class="panel"><div class="panel-head"><h3>Technician workload</h3></div><div class="card" style="border:none">
           ${d.workload.map((w) => `<div class="dist-row"><span>${esc(w.technician)} ${deptTag(w.department)}</span><strong>${w.open} open</strong></div>`).join('')}
-        </div></div>` : ''}
+        </div></div>` : (d.byTechnician && d.byTechnician.length ? `<div class="panel"><div class="panel-head"><h3>Tickets by technician</h3></div><div class="card" style="border:none">
+          ${d.byTechnician.map((w) => `<div class="dist-row"><span>${esc(w.assignee_name)}</span><strong>${w.c}</strong></div>`).join('')}
+        </div></div>` : '')}
       </div>`;
+    animateCounters($('#d-rest'));
+    const goRep = $('#d-goreport'); if (goRep) goRep.addEventListener('click', () => navigate('/reports'));
   } catch (e) { $('#d-rest').innerHTML = errBox(e); }
 }
 function statCard(n, l, accent) { return `<div class="stat ${accent ? 'accent-' + accent : ''}"><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`; }
@@ -607,28 +640,47 @@ function skeletonStats() { return Array(5).fill('<div class="stat"><span class="
 // ==========================================================================
 // View: Tickets list
 // ==========================================================================
-const listFilters = { status: '', urgency: '', department: '', search: '' };
+// scope = technician PIC filter; sort = created_asc (default) | created_desc | urgency
+const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '' };
+const TECH_SCOPES = [
+  { value: '', label: 'My PIC outlets' },
+  { value: 'mine', label: 'Assigned to me' },
+  { value: 'unassigned_pic', label: 'Unassigned in my PIC' },
+  { value: 'all', label: 'All allowed tickets' },
+];
 async function renderTickets() {
   const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
+  const showRegion = ['SuperAdmin', 'AdminIT', 'AdminME', 'Leader'].includes(state.user.role);
+  const isTech = state.user.role.startsWith('Technician');
   view().innerHTML = `
     <div class="page-head"><h2>${navLabel('tickets')}</h2><p>${ticketsSubtitle()}</p></div>
     <div class="toolbar">
       <div class="search"><input id="f-search" placeholder="Search subject, #, requester…" value="${esc(listFilters.search)}"></div>
+      ${isTech ? `<select id="f-scope">${TECH_SCOPES.map((s) => `<option value="${s.value}" ${listFilters.scope === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}</select>` : ''}
       <select id="f-status"><option value="">All statuses</option>${STATUSES.map((s) => `<option ${listFilters.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select id="f-urg"><option value="">All urgency</option>${URGENCIES.map((s) => `<option ${listFilters.urgency === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       ${showDept ? `<select id="f-dept"><option value="">All depts</option><option ${listFilters.department === 'IT' ? 'selected' : ''}>IT</option><option ${listFilters.department === 'ME' ? 'selected' : ''}>ME</option></select>` : ''}
+      ${showRegion ? `<select id="f-region"><option value="">All regions</option>${REGIONS.map((r) => `<option ${listFilters.region === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : ''}
+      <select id="f-sort">
+        <option value="" ${!listFilters.sort ? 'selected' : ''}>Created ↓ (newest first)</option>
+        <option value="created_asc" ${listFilters.sort === 'created_asc' ? 'selected' : ''}>Created ↑ (oldest first)</option>
+        <option value="urgency" ${listFilters.sort === 'urgency' ? 'selected' : ''}>Urgency</option>
+      </select>
     </div>
     <div id="ticket-list" class="ticket-list">${skeletonRows()}</div>`;
   $('#f-search').addEventListener('input', debounce((e) => { listFilters.search = e.target.value.trim(); loadTicketList(); }, 350));
   $('#f-status').addEventListener('change', (e) => { listFilters.status = e.target.value; loadTicketList(); });
   $('#f-urg').addEventListener('change', (e) => { listFilters.urgency = e.target.value; loadTicketList(); });
+  if (isTech) $('#f-scope').addEventListener('change', (e) => { listFilters.scope = e.target.value; loadTicketList(); });
   if (showDept) $('#f-dept').addEventListener('change', (e) => { listFilters.department = e.target.value; loadTicketList(); });
+  if (showRegion) $('#f-region').addEventListener('change', (e) => { listFilters.region = e.target.value; loadTicketList(); });
+  $('#f-sort').addEventListener('change', (e) => { listFilters.sort = e.target.value; loadTicketList(); });
   loadTicketList();
 }
 function ticketsSubtitle() {
   const r = state.user.role;
   if (r === 'Requestor') return 'Issues you have reported';
-  if (r.startsWith('Technician')) return 'Jobs assigned to you';
+  if (r.startsWith('Technician')) return 'Tickets in your PIC outlet scope';
   if (r === 'Leader') return 'View-only across your scope';
   return 'Manage and respond to tickets';
 }
@@ -638,18 +690,19 @@ async function loadTicketList() {
   try {
     const rows = await api.tickets(qs.toString());
     const box = $('#ticket-list'); if (!box) return;
-    if (!rows.length) { box.innerHTML = emptyBox('ticket', 'No tickets', CAN_CREATE.includes(state.user.role) ? 'Tap “Report Issue” to create one.' : 'Nothing here yet.'); return; }
+    if (!rows.length) { box.innerHTML = emptyBox('ticket', 'No tickets', CAN_CREATE.includes(state.user.role) ? 'Tap “Report Issue” to create one.' : 'Nothing here in this scope.'); return; }
     box.innerHTML = rows.map(ticketRow).join('');
     $$('.ticket-row', box).forEach((el) => el.addEventListener('click', () => navigate('/tickets/' + el.dataset.id)));
   } catch (e) { const box = $('#ticket-list'); if (box) box.innerHTML = errBox(e); }
 }
 function ticketRow(t) {
+  const sched = t.status === 'On Scheduled' && t.scheduled_at ? `<span class="sched-chip">📅 ${fmtDate(t.scheduled_at)}</span>` : '';
   return `<div class="ticket-row" data-id="${t.id}">
     <div>${deptTag(t.department)}</div>
     <div style="min-width:0">
       <div class="tnum">${esc(t.ticket_number || '#' + t.id)}</div>
       <div class="ttitle">${esc(t.title)}</div>
-      <div class="tmeta"><span>${esc(t.outlet_code || '—')}${t.brand_code ? ' · ' + esc(t.brand_code) : ''}</span><span>${esc(t.category || '')}</span><span>${esc(t.assignee_name && t.assignee_name !== 'Unassigned' ? '👤 ' + t.assignee_name : 'Unassigned')}</span><span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div>
+      <div class="tmeta"><span>${esc(t.outlet_code || '—')}${t.region ? ' · ' + esc(t.region) : ''}</span><span>${esc(t.category || '')}</span><span>${esc(t.assignee_name && t.assignee_name !== 'Unassigned' ? '👤 ' + t.assignee_name : 'Unassigned')}</span>${sched}<span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div>
     </div>
     <div class="tbadges">${urgBadge(t.urgency)}${badge(t.status)}</div>
   </div>`;
@@ -714,6 +767,8 @@ async function renderTicketDetail(id) {
             <dt>Requester</dt><dd>${esc(t.customer_name || '—')}</dd>
             <dt>Contact</dt><dd>${esc(t.contact_number || '—')}</dd>
             <dt>Assignee</dt><dd>${esc(t.assignee_name || 'Unassigned')}</dd>
+            ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
+            ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}
             ${t.location_detail ? `<dt>Location</dt><dd>${esc(t.location_detail)}</dd>` : ''}
             ${t.device_equipment ? `<dt>Device</dt><dd>${esc(t.device_equipment)}</dd>` : ''}
             ${t.business_impact ? `<dt>Impact</dt><dd>${esc(t.business_impact)}</dd>` : ''}
@@ -774,8 +829,24 @@ function wireReply(t) {
     } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Send'; }
   });
 }
+// A technician may self-assign a ticket in their own department that isn't
+// closed/cancelled and isn't already theirs. Backend re-checks PIC/outlet scope.
+function canSelfAssign(t) {
+  const u = state.user;
+  if (!u.role.startsWith('Technician')) return false;
+  const myDept = u.role === 'TechnicianIT' ? 'IT' : 'ME';
+  if (t.department !== myDept) return false;
+  if (t.assigned_technician_id === u.id) return false;
+  if (['Closed', 'Cancelled'].includes(t.status)) return false;
+  return true;
+}
 function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
-  if (!isDeptAdmin && !isAssignedTech) return `<div class="card"><h3 style="font-size:.95rem;margin-bottom:6px">Status</h3>${badge(t.status)}<p class="muted mt" style="font-size:.8rem">You’ll be notified of updates here.</p></div>`;
+  if (!isDeptAdmin && !isAssignedTech) {
+    const selfAssign = canSelfAssign(t)
+      ? `<button class="btn-primary btn-block mt" id="act-selfassign">＋ Assign to me</button>`
+      : '';
+    return `<div class="card"><h3 style="font-size:.95rem;margin-bottom:6px">Status</h3>${badge(t.status)}<p class="muted mt" style="font-size:.8rem">You’ll be notified of updates here.</p>${selfAssign}</div>`;
+  }
   let html = `<div class="card"><h3 style="font-size:.95rem;margin-bottom:12px">Actions</h3>`;
   // Assignment (admin)
   if (isDeptAdmin) {
@@ -793,6 +864,12 @@ function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
   return html;
 }
 function wireActionPane(t, isDeptAdmin, isAssignedTech) {
+  const selfBtn = $('#act-selfassign');
+  if (selfBtn) selfBtn.addEventListener('click', async () => {
+    selfBtn.disabled = true; selfBtn.textContent = 'Assigning…';
+    try { await api.assignToMe(t.id); toast('Ticket assigned to you', 'success'); renderTicketDetail(t.id); }
+    catch (e) { toast(e.message, 'error'); selfBtn.disabled = false; selfBtn.textContent = '＋ Assign to me'; }
+  });
   if (!isDeptAdmin && !isAssignedTech) return;
   const assignBtn = $('#btn-assign'); if (assignBtn) assignBtn.addEventListener('click', () => openAssignModal(t, () => renderTicketDetail(t.id)));
   const apply = $('#act-apply');
@@ -822,6 +899,11 @@ async function collectStatusExtras(t, newStatus) {
   }
   if (newStatus === 'Cancelled') {
     return await formModal('Cancel ticket', [{ name: 'cancel_reason', label: 'Reason for cancellation', type: 'textarea', required: true }], 'Cancel ticket');
+  }
+  if (newStatus === 'On Scheduled') {
+    return await formModal('Schedule work', [
+      { name: 'scheduled_at', label: 'Planned date & time', type: 'datetime-local', required: true, value: t.scheduled_at ? String(t.scheduled_at).replace(' ', 'T').slice(0, 16) : '' },
+    ], 'Set schedule');
   }
   if (newStatus === 'Waiting Sparepart') {
     return await formModal('Waiting for sparepart', [
@@ -1251,61 +1333,318 @@ function confirmModal(title, message, okLabel = 'Delete') {
 }
 
 // ==========================================================================
-// View: Reports
+// View: Reporting & Performance (managerial module)
 // ==========================================================================
+const REPORT_TABS = [
+  ['summary', 'Executive Summary'],
+  ['tech', 'Technician Performance'],
+  ['outlet', 'Outlet / Region'],
+  ['dept', 'Department'],
+  ['sla', 'SLA Detail'],
+  ['sched', 'On Scheduled'],
+  ['insight', 'Manager Insights'],
+];
+const RANK_VIEWS = [
+  ['assigned', 'Most assigned'],
+  ['resolved', 'Most resolved'],
+  ['fast', 'Fastest avg resolution'],
+  ['sla', 'Highest SLA %'],
+  ['overdue', 'Most SLA breaches'],
+  ['workload', 'Highest workload'],
+];
+let _perf = null;         // last performance payload
+let _reportTab = 'summary';
+let _rankView = 'assigned';
+
+// minutes → "2h 15m" / "1d 4h" / "35m" (mirrors backend fmtDuration)
+function fmtMins(m) {
+  if (m == null) return '—';
+  if (m < 60) return m + 'm';
+  if (m < 1440) { const h = Math.floor(m / 60), mm = m % 60; return mm ? `${h}h ${mm}m` : `${h}h`; }
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60); return h ? `${d}d ${h}h` : `${d}d`;
+}
+function slaBadge(s) {
+  const cls = { 'Met': 'st-Resolved', 'Breached': 'st-Cancelled', 'At Risk': 'ur-High', 'Not Started': 'st-New', 'On Track': 'st-Open' }[s] || 'st-Assigned';
+  return `<span class="badge ${cls}">${esc(s || '—')}</span>`;
+}
+const localISO = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
 async function renderReports() {
   const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
-  let brands = [];
-  try { brands = await api.brands(); } catch (_) {}
-  view().innerHTML = `<div class="page-head"><h2>Reports</h2><p>Server-side, permission-scoped</p></div>
-    <div class="card mb">
+  let brands = [], outlets = [], techs = [], cats = [];
+  try {
+    [brands, outlets, techs, cats] = await Promise.all([
+      api.brands().catch(() => []),
+      (api.allOutlets ? api.allOutlets().catch(() => api.outlets()) : api.outlets()).catch(() => []),
+      api.technicians().catch(() => []),
+      (api.allCategories ? api.allCategories().catch(() => []) : Promise.resolve([])),
+    ]);
+  } catch (_) {}
+  const catNames = [...new Set((cats || []).map((c) => c.name).filter(Boolean))].sort();
+  const now = new Date();
+  const monthStart = localISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  const today = localISO(now);
+
+  view().innerHTML = `<div class="page-head"><h2>Reporting &amp; Performance</h2><p>Managerial performance — server-side &amp; permission-scoped${state.user.role !== 'SuperAdmin' ? ` · ${esc(state.user.department || state.user.role)} scope` : ''}</p></div>
+    <div class="card mb no-print">
       <div class="field-row">
+        <div class="field"><label>From</label><input type="date" id="r-from" value="${monthStart}"></div>
+        <div class="field"><label>To</label><input type="date" id="r-to" value="${today}"></div>
         ${showDept ? `<div class="field"><label>Department</label><select id="r-dept"><option value="">All</option><option>IT</option><option>ME</option></select></div>` : ''}
+        <div class="field"><label>Region</label><select id="r-region"><option value="">All</option>${REGIONS.map((r) => `<option>${esc(r)}</option>`).join('')}</select></div>
+      </div>
+      <div class="field-row">
         <div class="field"><label>Brand</label><select id="r-brand"><option value="">All</option>${brands.map((b) => `<option>${esc(b.code)}</option>`).join('')}</select></div>
+        <div class="field"><label>Outlet</label><select id="r-outlet"><option value="">All</option>${outlets.map((o) => `<option value="${esc(o.code)}">${esc(o.code)}</option>`).join('')}</select></div>
+        <div class="field"><label>Technician</label><select id="r-tech"><option value="">All</option>${techs.map((t) => `<option>${esc(t.username)}</option>`).join('')}</select></div>
+        <div class="field"><label>Category</label><select id="r-cat"><option value="">All</option>${catNames.map((c) => `<option>${esc(c)}</option>`).join('')}</select></div>
       </div>
       <div class="field-row">
         <div class="field"><label>Status</label><select id="r-status"><option value="">All</option>${STATUSES.map((s) => `<option>${s}</option>`).join('')}</select></div>
         <div class="field"><label>Urgency</label><select id="r-urg"><option value="">All</option>${URGENCIES.map((s) => `<option>${s}</option>`).join('')}</select></div>
-      </div>
-      <div class="field-row">
-        <div class="field"><label>From</label><input type="date" id="r-from"></div>
-        <div class="field"><label>To</label><input type="date" id="r-to"></div>
+        <div class="field"><label>SLA status</label><select id="r-sla"><option value="">All</option>${['Met', 'Breached', 'At Risk', 'Not Started', 'On Track'].map((s) => `<option>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Scheduled from</label><input type="date" id="r-sfrom"></div>
+        <div class="field"><label>Scheduled to</label><input type="date" id="r-sto"></div>
       </div>
       <div class="row wrap gap-sm">
         <button class="btn-primary" id="r-run">Generate</button>
-        <button class="btn-outline" id="r-csv">Export CSV</button>
+        <button class="btn-outline" id="r-csv-raw">CSV: tickets</button>
+        <button class="btn-outline" id="r-csv-tech">CSV: technicians</button>
+        <button class="btn-outline" id="r-csv-sla">CSV: SLA detail</button>
         <button class="btn-outline" id="r-print">Print</button>
       </div>
     </div>
-    <div id="r-result"></div>`;
+    <div class="tabbar no-print" id="r-tabs">${REPORT_TABS.map(([k, l]) => `<button class="tab ${k === _reportTab ? 'active' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
+    <div id="r-result"><div class="loading-inline">Generating report…</div></div>`;
+
   const params = () => {
     const q = new URLSearchParams();
-    if (showDept && $('#r-dept').value) q.append('department', $('#r-dept').value);
-    if ($('#r-brand').value) q.append('brand', $('#r-brand').value);
-    if ($('#r-status').value) q.append('status', $('#r-status').value);
-    if ($('#r-urg').value) q.append('urgency', $('#r-urg').value);
-    if ($('#r-from').value) q.append('start_date', $('#r-from').value);
-    if ($('#r-to').value) q.append('end_date', $('#r-to').value);
+    if (showDept && $('#r-dept') && $('#r-dept').value) q.append('department', $('#r-dept').value);
+    const g = (id, key) => { const el = $(id); if (el && el.value) q.append(key, el.value); };
+    g('#r-region', 'region'); g('#r-brand', 'brand'); g('#r-outlet', 'outlet');
+    g('#r-tech', 'technician'); g('#r-cat', 'category'); g('#r-status', 'status');
+    g('#r-urg', 'urgency'); g('#r-sla', 'sla_status');
+    g('#r-from', 'start_date'); g('#r-to', 'end_date');
+    g('#r-sfrom', 'scheduled_from'); g('#r-sto', 'scheduled_to');
     return q;
   };
-  $('#r-run').addEventListener('click', async () => {
-    const q = params();
+  const run = async () => {
     if ($('#r-from').value && $('#r-to').value && $('#r-from').value > $('#r-to').value) { toast('Start date is after end date', 'error'); return; }
-    $('#r-result').innerHTML = `<div class="loading-inline">Running report…</div>`;
+    $('#r-result').innerHTML = `<div class="loading-inline">Generating report…</div>`;
+    const qs = params().toString();
+    const url = '/api/reports/performance' + (qs ? '?' + qs : '');
     try {
-      const rows = await api.report(q.toString());
-      $('#r-result').innerHTML = rows.length ? reportTable(rows) : emptyBox('chart', 'No matching tickets', 'Adjust filters and try again.');
-      toast(rows.length ? `Report ready — ${rows.length} ticket(s)` : 'No matching tickets', rows.length ? 'success' : 'info');
-    } catch (e) { $('#r-result').innerHTML = errBox(e); toast(e.message, 'error'); }
-  });
-  $('#r-csv').addEventListener('click', () => { window.open('/api/reports/export?' + params().toString(), '_blank'); toast('Preparing CSV export…', 'info'); });
+      _perf = await api.performance(qs);
+      drawReportTab();
+      toast(`Report ready — ${_perf.summary.total} ticket(s)`, _perf.summary.total ? 'success' : 'info');
+    } catch (e) {
+      const status = e.status || '?';
+      console.error(`[Reporting] ${url} failed — HTTP ${status}`, e);
+      const hint = status === 404
+        ? 'Reporting endpoint not found — the server may need to be restarted to load the latest routes.'
+        : status === 403
+          ? 'You do not have permission to view the performance report.'
+          : (e.message || 'Please try again.');
+      $('#r-result').innerHTML = `<div class="empty"><h3>Couldn’t load the report</h3><p>${esc(hint)}</p><p class="muted" style="font-size:.78rem">GET ${esc(url)} → HTTP ${esc(status)}</p></div>`;
+      toast(`Report failed (HTTP ${status})`, 'error');
+    }
+  };
+  $('#r-run').addEventListener('click', run);
+  const openCsv = (kind) => { const q = params(); if (kind) q.append('export', kind); window.open('/api/reports/export?' + q.toString(), '_blank'); toast('Preparing CSV export…', 'info'); };
+  $('#r-csv-raw').addEventListener('click', () => openCsv('raw'));
+  $('#r-csv-tech').addEventListener('click', () => openCsv('technician'));
+  $('#r-csv-sla').addEventListener('click', () => openCsv('sla'));
   $('#r-print').addEventListener('click', () => window.print());
+  $$('#r-tabs .tab').forEach((b) => b.addEventListener('click', () => {
+    _reportTab = b.dataset.tab;
+    $$('#r-tabs .tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === _reportTab));
+    drawReportTab();
+  }));
+  await run();
 }
-function reportTable(rows) {
-  return `<div class="panel"><div class="panel-head"><h3>${rows.length} ticket(s)</h3></div><div class="table-wrap"><table class="data">
-    <thead><tr><th>Ticket</th><th>Dept</th><th>Category</th><th>Outlet</th><th>Status</th><th>Urgency</th><th>Assignee</th><th>Created</th></tr></thead>
-    <tbody>${rows.map((t) => `<tr><td class="nowrap">${esc(t.ticket_number)}</td><td>${deptTag(t.department)}</td><td>${esc(t.category || '')}</td><td>${esc(t.outlet_display || t.outlet_code || '')}</td><td>${badge(t.status)}</td><td>${urgBadge(t.urgency)}</td><td>${esc(t.assignee_name || '')}</td><td class="nowrap">${fmtDate(t.created_at)}</td></tr>`).join('')}</tbody>
-  </table></div></div>`;
+
+function drawReportTab() {
+  const box = $('#r-result'); if (!box || !_perf) return;
+  const p = _perf;
+  box.innerHTML = ({
+    summary: () => reportSummary(p),
+    tech: () => reportTechnicians(p),
+    outlet: () => reportOutlets(p),
+    dept: () => reportDepartments(p),
+    sla: () => reportSlaDetail(p),
+    sched: () => reportScheduled(p),
+    insight: () => reportInsights(p),
+  }[_reportTab] || (() => reportSummary(p)))();
+  animateCounters(box);
+  if (_reportTab === 'tech') {
+    $$('#rank-view .tab').forEach((b) => b.addEventListener('click', () => {
+      _rankView = b.dataset.rank;
+      drawReportTab();
+    }));
+  }
+}
+
+function reportSummary(p) {
+  const s = p.summary;
+  return `<div class="panel"><div class="panel-head"><h3>Executive Summary</h3></div>
+    <div class="stat-grid">
+      ${statCard(s.total, 'Total tickets', 'primary')}
+      ${statCard(s.new, 'New')}
+      ${statCard(s.assigned, 'Assigned')}
+      ${statCard(s.on_scheduled, 'On Scheduled')}
+      ${statCard(s.on_progress, 'On Progress')}
+      ${statCard(s.waiting_sparepart, 'Waiting Sparepart')}
+      ${statCard(s.waiting_vendor, 'Waiting Vendor')}
+      ${statCard(s.resolved, 'Resolved', 'ok')}
+      ${statCard(s.closed, 'Closed')}
+      ${statCard(s.cancelled, 'Cancelled')}
+      ${statCard(s.sla_met, 'SLA met', 'ok')}
+      ${statCard(s.sla_breached, 'SLA breached', 'danger')}
+      ${statCard(s.sla_achievement != null ? s.sla_achievement + '%' : '—', 'SLA achievement', 'primary')}
+      ${statCard(fmtMins(s.avg_first_response_mins), 'Avg first response')}
+      ${statCard(fmtMins(s.avg_assign_mins), 'Avg assignment')}
+      ${statCard(fmtMins(s.avg_start_mins), 'Avg time to start')}
+      ${statCard(fmtMins(s.avg_resolution_mins), 'Avg resolution', 'ok')}
+      ${statCard(fmtMins(s.avg_close_mins), 'Avg close')}
+    </div>
+    <div class="hint" style="padding:6px 4px">SLA targets — Critical ${fmtMins(p.targets.Critical)} · High ${fmtMins(p.targets.High)} · Medium ${fmtMins(p.targets.Medium)} · Low ${fmtMins(p.targets.Low)} (configurable).</div>
+  </div>`;
+}
+
+function reportTechnicians(p) {
+  const techs = [...p.technicians];
+  const cmp = {
+    assigned: (a, b) => b.assigned - a.assigned,
+    resolved: (a, b) => b.resolved - a.resolved,
+    fast: (a, b) => (a.avg_resolution_mins == null ? Infinity : a.avg_resolution_mins) - (b.avg_resolution_mins == null ? Infinity : b.avg_resolution_mins),
+    sla: (a, b) => (b.sla_achievement == null ? -1 : b.sla_achievement) - (a.sla_achievement == null ? -1 : a.sla_achievement),
+    overdue: (a, b) => b.sla_breached - a.sla_breached,
+    workload: (a, b) => b.open_workload - a.open_workload,
+  }[_rankView] || ((a, b) => b.assigned - a.assigned);
+  techs.sort(cmp);
+  const rankBar = `<div class="tabbar" id="rank-view">${RANK_VIEWS.map(([k, l]) => `<button class="tab ${k === _rankView ? 'active' : ''}" data-rank="${k}">${l}</button>`).join('')}</div>`;
+  const rows = techs.map((t) => `<tr>
+    <td><strong>${esc(t.technician)}</strong></td>
+    <td>${deptTag(t.department)}</td>
+    <td>${esc(t.pic_area || t.region || '—')}</td>
+    <td class="num">${t.coverage != null ? t.coverage : '—'}</td>
+    <td class="num">${t.assigned}</td>
+    <td class="num">${t.resolved}</td>
+    <td class="num">${t.open_workload}</td>
+    <td class="num">${fmtMins(t.avg_first_response_mins)}</td>
+    <td class="num">${fmtMins(t.avg_start_mins)}</td>
+    <td class="num">${fmtMins(t.avg_resolution_mins)}</td>
+    <td class="num">${t.sla_met}</td>
+    <td class="num">${t.sla_breached}</td>
+    <td class="num">${t.sla_achievement != null ? t.sla_achievement + '%' : '—'}</td>
+    <td class="num">${t.waiting}</td>
+    <td class="num">${t.scheduled_not_started}</td>
+  </tr>`).join('');
+  return `<div class="panel"><div class="panel-head"><h3>Technician Performance</h3></div>
+    ${rankBar}
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Technician</th><th>Dept</th><th>PIC area</th><th>Coverage</th><th>Assigned</th><th>Resolved</th><th>Open</th><th>Avg 1st resp</th><th>Avg start</th><th>Avg resolve</th><th>SLA met</th><th>SLA breach</th><th>SLA %</th><th>Waiting</th><th>Sched n/started</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="15" class="muted" style="text-align:center;padding:16px">No technicians in scope</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function reportOutlets(p) {
+  const outletRows = p.outlets.map((o) => `<tr><td><strong>${esc(o.outlet)}</strong></td><td class="num">${o.total}</td><td class="num">${o.sla_breached}</td><td class="num">${fmtMins(o.avg_resolution_mins)}</td><td class="num">${o.recurring || 0}</td></tr>`).join('');
+  const regionRows = p.regions.map((r) => `<tr><td>${esc(r.region)}</td><td class="num">${r.total}</td><td class="num">${r.sla_breached}</td><td class="num">${fmtMins(r.avg_resolution_mins)}</td></tr>`).join('');
+  const brandRows = p.brands.map((b) => `<div class="dist-row"><span>${esc(b.brand)}</span><strong>${b.total}</strong></div>`).join('') || '<p class="muted">No data</p>';
+  const catRows = p.categories.slice(0, 12).map((c) => `<div class="dist-row"><span>${deptTag(c.department)} ${esc(c.category)}</span><strong>${c.total}</strong></div>`).join('') || '<p class="muted">No data</p>';
+  const recRows = p.recurring.slice(0, 12).map((r) => `<div class="dist-row"><span>${esc(r.outlet)} · ${esc(r.category)}</span><strong>${r.count}×</strong></div>`).join('') || '<p class="muted">No repeated same-category issues</p>';
+  return `<div class="panel"><div class="panel-head"><h3>Region performance</h3></div><div class="table-wrap"><table class="data">
+      <thead><tr><th>Region</th><th>Tickets</th><th>SLA breaches</th><th>Avg resolution</th></tr></thead>
+      <tbody>${regionRows || '<tr><td colspan="4" class="muted">No data</td></tr>'}</tbody></table></div></div>
+    <div class="panel mt"><div class="panel-head"><h3>Most problematic outlets</h3></div><div class="table-wrap"><table class="data">
+      <thead><tr><th>Outlet</th><th>Tickets</th><th>SLA breaches</th><th>Avg resolution</th><th>Worst recurring</th></tr></thead>
+      <tbody>${outletRows || '<tr><td colspan="5" class="muted">No data</td></tr>'}</tbody></table></div></div>
+    <div class="grid-2 mt">
+      <div class="panel"><div class="panel-head"><h3>By brand</h3></div><div class="card" style="border:none">${brandRows}</div></div>
+      <div class="panel"><div class="panel-head"><h3>Recurring issues (outlet · category)</h3></div><div class="card" style="border:none">${recRows}</div></div>
+    </div>
+    <div class="panel mt"><div class="panel-head"><h3>Recurring categories</h3></div><div class="card" style="border:none">${catRows}</div></div>`;
+}
+
+function reportDepartments(p) {
+  const rows = p.departments.map((d) => `<tr>
+    <td>${deptTag(d.department)}</td>
+    <td class="num">${d.total}</td>
+    <td class="num">${d.backlog}</td>
+    <td class="num">${fmtMins(d.avg_resolution_mins)}</td>
+    <td class="num">${d.sla_achievement != null ? d.sla_achievement + '%' : '—'}</td>
+    <td class="num">${d.waiting}</td>
+    <td class="num">${d.on_scheduled}</td>
+    <td class="num">${d.technicians}</td>
+  </tr>`).join('');
+  return `<div class="panel"><div class="panel-head"><h3>Department Performance — IT vs ME</h3></div><div class="table-wrap"><table class="data">
+    <thead><tr><th>Dept</th><th>Volume</th><th>Backlog</th><th>Avg resolution</th><th>SLA %</th><th>Waiting</th><th>On Scheduled</th><th>Technicians</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="8" class="muted">No data</td></tr>'}</tbody></table></div></div>`;
+}
+
+function reportSlaDetail(p) {
+  const rows = p.tickets.map((t) => `<tr>
+    <td class="nowrap">${esc(t.ticket_number)}</td>
+    <td class="nowrap">${fmtDate(t.created_at)}</td>
+    <td>${esc(t.region || '—')}</td>
+    <td>${esc(t.brand_code || '—')}</td>
+    <td>${esc(t.outlet_display || t.outlet_code || '—')}</td>
+    <td>${deptTag(t.department)}</td>
+    <td>${esc(t.category || '')}</td>
+    <td>${urgBadge(t.urgency)}</td>
+    <td>${badge(t.status)}</td>
+    <td>${esc(t.assignee_name || '')}</td>
+    <td class="nowrap">${fmtDate(t.assigned_at)}</td>
+    <td class="nowrap">${fmtDate(t.started_at)}</td>
+    <td class="nowrap">${fmtDate(t.resolved_at)}</td>
+    <td class="nowrap">${fmtDate(t.closed_at)}</td>
+    <td class="nowrap">${fmtDate(t.sla_deadline_at)}</td>
+    <td>${slaBadge(t.sla_status)}</td>
+    <td class="num">${t.breach_minutes ? fmtMins(t.breach_minutes) : '—'}</td>
+    <td class="num">${fmtMins(t.aging_minutes)}</td>
+  </tr>`).join('');
+  return `<div class="panel"><div class="panel-head"><h3>SLA Detail — ${p.tickets.length} ticket(s)</h3></div><div class="table-wrap"><table class="data">
+    <thead><tr><th>Ticket</th><th>Created</th><th>Region</th><th>Brand</th><th>Outlet</th><th>Dept</th><th>Category</th><th>Urg</th><th>Status</th><th>Technician</th><th>Assigned</th><th>Started</th><th>Resolved</th><th>Closed</th><th>SLA deadline</th><th>SLA status</th><th>Breach</th><th>Aging</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="18" class="muted" style="text-align:center;padding:16px">No matching tickets</td></tr>'}</tbody></table></div></div>`;
+}
+
+function reportScheduled(p) {
+  const sc = p.scheduled;
+  const list = sc.list.map((r) => `<tr>
+    <td class="nowrap">${esc(r.ticket_number)}</td>
+    <td>${esc(r.outlet || '—')}</td>
+    <td>${esc(r.region || '—')}</td>
+    <td>${esc(r.category || '')}</td>
+    <td>${r.technician ? esc(r.technician) : '<span class="muted">Unassigned</span>'}</td>
+    <td class="nowrap">${fmtDate(r.scheduled_at)}</td>
+    <td class="nowrap">${fmtDate(r.scheduled_end)}</td>
+    <td>${r.started ? '<span class="badge st-Resolved">Started</span>' : '<span class="badge st-New">Not started</span>'}</td>
+  </tr>`).join('');
+  return `<div class="panel"><div class="panel-head"><h3>On Scheduled Monitoring</h3></div>
+    <div class="stat-grid">
+      ${statCard(sc.total, 'On Scheduled total', 'primary')}
+      ${statCard(sc.today, 'Scheduled today')}
+      ${statCard(sc.this_week, 'Scheduled this week')}
+      ${statCard(sc.overdue, 'Overdue', 'danger')}
+      ${statCard(sc.not_started, 'Not started', 'warn')}
+      ${statCard(sc.not_assigned, 'Not assigned', 'danger')}
+    </div>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Ticket</th><th>Outlet</th><th>Region</th><th>Category</th><th>Technician</th><th>Scheduled start</th><th>Scheduled end</th><th>Execution</th></tr></thead>
+      <tbody>${list || '<tr><td colspan="8" class="muted" style="text-align:center;padding:16px">No scheduled tickets in scope</td></tr>'}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function reportInsights(p) {
+  const ins = p.insights || { summary: '', bullets: [] };
+  return `<div class="panel"><div class="panel-head"><h3>Manager Insights</h3></div>
+    <div class="insight-brief">${esc(ins.summary)}</div>
+    <ul class="insight-list">${ins.bullets.map((b) => `<li>${esc(b)}</li>`).join('') || '<li class="muted">No notable highlights for this selection.</li>'}</ul>
+    <div class="hint" style="padding:6px 4px">Generated from the current filters. Adjust the filters and re-generate to update this briefing.</div>
+  </div>`;
 }
 
 // ==========================================================================
@@ -1329,7 +1668,10 @@ async function renderUsers() {
 }
 function userRow(u) {
   const self = state.user.id === u.id;
-  const access = u.all_brands ? 'All brands' : (u.brand || '—');
+  let access = u.all_brands ? 'All brands' : (u.brand || '—');
+  if (u.all_outlets) access += ' · all outlets';
+  else if (u.outlet_access && u.outlet_access.length) access += ` · ${u.outlet_access.length} PIC outlet(s)`;
+  if (u.region) access += ` · ${u.region}`;
   return `<tr>
     <td><strong>${esc(u.username)}</strong> ${self ? '<span class="muted">(you)</span>' : ''}</td>
     <td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.department || '—')}</td>
@@ -1341,18 +1683,36 @@ function userRow(u) {
 const ALL_ROLES = ['Requestor', 'TechnicianIT', 'TechnicianME', 'AdminIT', 'AdminME', 'Leader', 'SuperAdmin'];
 async function openUserModal(u, after) {
   const isEdit = !!u;
+  // Load reference data for the dropdowns (brands + outlets for PIC coverage).
+  let brands = [], outlets = [];
+  try { [brands, outlets] = await Promise.all([api.brands(), api.allOutlets().catch(() => api.outlets())]); }
+  catch (_) {}
+  const brandOptions = [{ value: '', label: '— None —' }, ...brands.map((b) => ({ value: b.code, label: `${b.code} — ${b.name}` }))];
+  const regionOptions = [{ value: '', label: '— None —' }, ...REGIONS.map((r) => ({ value: r, label: r }))];
+  const outletOptions = outlets.map((o) => ({ value: o.code, label: `${o.code}${o.region ? ' · ' + o.region : ''} (${o.brand_code})` }));
+
   const v = await formModal(isEdit ? 'Edit user' : 'Add user', [
     { name: 'username', label: 'Full name', required: !isEdit, value: u ? u.username : '' },
     { name: 'email', label: 'Email', type: 'email', required: !isEdit, value: u ? u.email : '' },
     { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: ALL_ROLES.map((r) => ({ value: r, label: r })) },
-    { name: 'brand', label: 'Brand (blank = none)', value: u ? (u.brand || '') : '' },
+    { name: 'brand', label: 'Brand', type: 'select', value: u ? (u.brand || '') : '', options: brandOptions, hint: 'Single brand access (leave None for requestors or all-brand staff).' },
     { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
+    { name: 'region', label: 'Region', type: 'select', value: u ? (u.region || '') : '', options: regionOptions },
+    { name: 'pic_area', label: 'PIC area (technician label, optional)', value: u ? (u.pic_area || '') : '', placeholder: 'e.g. IT Area 1' },
+    { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
+    { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
     { name: 'can_close_override', label: '', type: 'checkbox', checkboxLabel: 'Technician may close tickets', value: u ? !!u.can_close_override : false },
     { name: 'is_active', label: '', type: 'checkbox', checkboxLabel: 'Active', value: u ? !!u.is_active : true },
     { name: 'password', label: isEdit ? 'New password (blank = keep)' : 'Password', type: 'password', required: !isEdit, hint: 'Min 10 chars, upper/lower/number/special' },
   ], isEdit ? 'Save' : 'Create');
   if (!v) return;
-  const payload = { username: v.username, email: v.email, role: v.role, brand: v.brand || null, all_brands: v.all_brands, can_close_override: v.can_close_override, is_active: v.is_active };
+  const payload = {
+    username: v.username, email: v.email, role: v.role,
+    brand: v.brand || null, all_brands: v.all_brands,
+    region: v.region || null, pic_area: v.pic_area || null,
+    outlet_access: v.outlet_access, all_outlets: v.all_outlets,
+    can_close_override: v.can_close_override, is_active: v.is_active,
+  };
   if (v.password) payload.password = v.password;
   try {
     if (isEdit) await api.patchUser(u.id, payload); else await api.createUser(payload);
@@ -1554,12 +1914,13 @@ async function renderLocations() {
               <th>Outlet Code</th>
               <th>Outlet Name</th>
               <th>Brand</th>
+              <th>Region</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="loc-body">
-            <tr><td colspan="5" class="loading-inline">Loading…</td></tr>
+            <tr><td colspan="6" class="loading-inline">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -1575,7 +1936,7 @@ async function renderLocations() {
     );
     const tbody = $('#loc-body');
     if (!tbody) return;
-    tbody.innerHTML = rows.length ? rows.map(outletRow).join('') : '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No locations found</td></tr>';
+    tbody.innerHTML = rows.length ? rows.map(outletRow).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:20px">No locations found</td></tr>';
     
     // Bind actions
     $$('[data-edit-loc]').forEach((b) => b.addEventListener('click', () => openOutletModal(all.find((x) => x.id == b.dataset.editLoc), reload)));
@@ -1589,7 +1950,7 @@ async function renderLocations() {
       draw($('#loc-search').value.trim().toLowerCase());
     } catch (e) {
       const tbody = $('#loc-body');
-      if (tbody) tbody.innerHTML = `<tr><td colspan="5">${errBox(e)}</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6">${errBox(e)}</td></tr>`;
     }
   };
 
@@ -1600,7 +1961,7 @@ async function renderLocations() {
     await reload();
   } catch (e) {
     const tbody = $('#loc-body');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="5">${errBox(e)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6">${errBox(e)}</td></tr>`;
   }
 }
 
@@ -1613,6 +1974,7 @@ function outletRow(o) {
       <td><strong>${esc(o.code)}</strong></td>
       <td>${esc(o.name)}</td>
       <td><span class="badge" style="background:var(--surface-2);color:var(--text);border:1px solid var(--border)">${esc(o.brand_code)}</span></td>
+      <td>${esc(o.region || 'Jakarta')}</td>
       <td>${statusBadge}</td>
       <td class="nowrap">
         <button class="btn-ghost" data-edit-loc="${o.id}" style="padding:6px 8px">Edit</button>
@@ -1665,6 +2027,13 @@ async function openOutletModal(o, after) {
       label: 'Display Label (Optional — defaults to name)',
       value: o ? (o.display_label || '') : '',
       placeholder: 'e.g. Union Plaza'
+    },
+    {
+      name: 'region',
+      label: 'Region',
+      type: 'select',
+      value: o ? (o.region || 'Jakarta') : 'Jakarta',
+      options: REGIONS.map((r) => ({ value: r, label: r }))
     }
   ], isEdit ? 'Save' : 'Create');
 
@@ -1681,7 +2050,8 @@ async function openOutletModal(o, after) {
     brand_code: brandCode,
     code: v.code.trim().toUpperCase(),
     name: v.name.trim(),
-    display_label: (v.display_label.trim() || v.name.trim())
+    display_label: (v.display_label.trim() || v.name.trim()),
+    region: v.region || 'Jakarta'
   };
 
   try {
@@ -1745,6 +2115,13 @@ async function openReportModal() {
     <div class="field"><label>Department <span class="req-star">*</span></label>
       <div class="segmented"><button type="button" class="seg-btn big" data-dept="IT">🖥️ IT</button><button type="button" class="seg-btn big" data-dept="ME">🔧 Mechanical</button></div></div>
     <div class="field"><label>Category <span class="req-star">*</span></label><select id="q-cat" disabled><option>Select department first</option></select></div>
+    <div id="q-event" hidden>
+      <div class="field-row">
+        <div class="field"><label>Scheduled start (event)</label><input type="datetime-local" id="q-sched"></div>
+        <div class="field"><label>Scheduled end (optional)</label><input type="datetime-local" id="q-sched-end"></div>
+      </div>
+      <div class="hint">For Event tickets (e.g. printer setup, on-site standby) set the planned date/time. Admin can confirm as “On Scheduled” after review.</div>
+    </div>
     <div class="field"><label>What’s the issue? <span class="req-star">*</span></label><textarea id="q-desc" placeholder="e.g. POS terminal 2 not printing receipts"></textarea></div>
     <div class="field"><label>Urgency</label><div class="segmented" id="q-urg">${URGENCIES.map((u) => `<button type="button" class="seg-btn ${u === 'Medium' ? 'active' : ''}" data-urg="${u}">${u}</button>`).join('')}</div></div>
     <div class="field"><label>Contact / WhatsApp</label><input id="q-contact" placeholder="08xx…" inputmode="tel"></div>
@@ -1770,6 +2147,10 @@ async function openReportModal() {
         try { const cats = await api.categories(dept); sel.innerHTML = '<option value="">Select category…</option>' + cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join(''); sel.disabled = false; }
         catch (e) { sel.innerHTML = '<option>Failed to load</option>'; }
       }));
+      // Reveal scheduled date/time fields when the Event category is chosen.
+      $('#q-cat', ov).addEventListener('change', (e) => {
+        const ev = $('#q-event', ov); if (ev) ev.hidden = e.target.value !== 'Event';
+      });
       let urg = 'Medium';
       $$('[data-urg]', ov).forEach((b) => b.addEventListener('click', () => { urg = b.dataset.urg; $$('[data-urg]', ov).forEach((x) => x.classList.toggle('active', x === b)); }));
       $('#q-more', ov).addEventListener('click', () => { const e = $('#q-extra', ov); e.hidden = !e.hidden; $('#q-more', ov).textContent = (e.hidden ? '▾ Add more details (optional)' : '▴ Hide extra details'); });
@@ -1793,6 +2174,8 @@ async function openReportModal() {
           business_impact: $('#q-impact', ov) ? $('#q-impact', ov).value.trim() : '',
           occurrence_at: $('#q-occ', ov) ? $('#q-occ', ov).value : '',
           preferred_visit_time: $('#q-visit', ov) ? $('#q-visit', ov).value.trim() : '',
+          scheduled_at: $('#q-sched', ov) ? $('#q-sched', ov).value : '',
+          scheduled_end: $('#q-sched-end', ov) ? $('#q-sched-end', ov).value : '',
         };
         if (isAdmin) { payload.customer_name = $('#q-cname', ov).value.trim(); payload.customer_email = $('#q-cemail', ov).value.trim(); }
         try {

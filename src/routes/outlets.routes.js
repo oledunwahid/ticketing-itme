@@ -16,7 +16,7 @@ const router = express.Router();
 
 router.get("/api/meta/outlets", requireAuth, async (req, res) => {
   const rows = await db.pAll(
-    "SELECT code, name, brand_code, display_label FROM outlets WHERE active = 1 ORDER BY brand_code, code",
+    "SELECT code, name, brand_code, display_label, region FROM outlets WHERE active = 1 ORDER BY brand_code, code",
   );
   res.json(rows);
 });
@@ -51,6 +51,7 @@ router.post(
       const code = String(req.body.code || "").trim().toUpperCase();
       const name = String(req.body.name || "").trim();
       const displayLabel = String(req.body.display_label || name).trim();
+      const region = String(req.body.region || "Jakarta").trim() || "Jakarta";
 
       if (!brandCode) return res.status(400).json({ error: "Brand Code is required" });
       if (!code) return res.status(400).json({ error: "Outlet Code is required" });
@@ -67,8 +68,8 @@ router.post(
 
       const active = req.body.active !== false ? 1 : 0;
       const r = await db.pRun(
-        "INSERT INTO outlets (code, name, brand_code, display_label, active) VALUES (?, ?, ?, ?, ?)",
-        [code, name, brandCode, displayLabel, active]
+        "INSERT INTO outlets (code, name, brand_code, display_label, region, active) VALUES (?, ?, ?, ?, ?, ?)",
+        [code, name, brandCode, displayLabel, region, active]
       );
       const newOutlet = await db.pGet("SELECT * FROM outlets WHERE id = ?", [r.lastID]);
       res.status(201).json(newOutlet);
@@ -125,6 +126,11 @@ router.patch(
       if (req.body.display_label !== undefined) {
         const displayLabel = String(req.body.display_label || "").trim();
         set("display_label", displayLabel);
+      }
+
+      if (req.body.region !== undefined) {
+        const region = String(req.body.region || "").trim() || "Jakarta";
+        set("region", region);
       }
 
       if (req.body.active !== undefined) {

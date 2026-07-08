@@ -220,6 +220,7 @@ textarea { resize: vertical; min-height: 90px; }
 .st-New { background: rgba(59,130,246,.18); color: #60a5fa; }
 .st-Open { background: rgba(139,92,246,.18); color: #a78bfa; }
 .st-Assigned { background: rgba(14,165,233,.18); color: #38bdf8; }
+.st-OnScheduled { background: rgba(99,102,241,.20); color: #a5b4fc; }
 .st-OnProgress { background: rgba(245,158,11,.18); color: #fbbf24; }
 .st-WaitingSparepart, .st-WaitingVendor { background: rgba(234,179,8,.16); color: #eab308; }
 .st-PendingOutletResponse { background: rgba(148,163,184,.18); color: #94a3b8; }
@@ -231,6 +232,17 @@ textarea { resize: vertical; min-height: 90px; }
 .ur-Medium { background: rgba(59,130,246,.16); color: #60a5fa; }
 .ur-High { background: rgba(245,158,11,.18); color: #fbbf24; }
 .ur-Critical { background: rgba(239,68,68,.2); color: #f87171; }
+
+/* --- Scheduled chip (ticket rows) --- */
+.sched-chip { color: #a5b4fc; font-weight: 600; }
+
+/* --- Multiselect box (user modal PIC outlets) --- */
+.multiselect-box { max-height: 160px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 4px 12px; }
+.ms-opt { display: flex; align-items: center; gap: 6px; font-size: .82rem; cursor: pointer; }
+.ms-opt input { width: auto; }
+
+/* --- KPI grid (dashboard SLA section) --- */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 4px; }
 
 /* --- Empty / loading states --- */
 .empty { text-align: center; padding: 46px 20px; color: var(--text-muted); }
@@ -598,4 +610,36 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
   .sched-toolbar2 { flex-direction: column; align-items: stretch; }
   .sched-toolbar2-right { justify-content: space-between; }
   .sched-side-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* --- Reporting & Performance module --- */
+.tabbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.tabbar .tab {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-2);
+  border-radius: 999px; padding: 7px 14px; font-size: 0.82rem; font-weight: 600;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.tabbar .tab:hover { background: var(--surface-2); color: var(--text); }
+.tabbar .tab.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+body.light .tabbar .tab.active { color: var(--primary-600); }
+table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.insight-brief {
+  padding: 16px; font-size: 1rem; line-height: 1.65; color: var(--text);
+  background: var(--surface-2); border-left: 3px solid var(--primary); border-radius: var(--radius-sm); margin: 4px;
+}
+.insight-list { list-style: none; padding: 8px 16px 4px; display: grid; gap: 8px; }
+.insight-list li {
+  position: relative; padding-left: 20px; font-size: 0.9rem; color: var(--text-2);
+}
+.insight-list li::before { content: "▸"; position: absolute; left: 4px; color: var(--primary); }
+.insight-list li.muted::before { content: ""; }
+
+/* --- Print-friendly report --- */
+@media print {
+  .no-print, .sidebar, .topbar, .bottom-nav, #toast-container, .drawer-overlay { display: none !important; }
+  body, .app-shell, .main-wrap, .app-view { background: #fff !important; color: #000 !important; }
+  .main-wrap { margin: 0 !important; }
+  .panel, .card { break-inside: avoid; box-shadow: none !important; border: 1px solid #ccc !important; }
+  table.data { min-width: 0 !important; font-size: 10px; }
+  .stat-grid { grid-template-columns: repeat(4, 1fr) !important; }
 }

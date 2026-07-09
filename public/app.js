@@ -14,7 +14,7 @@ const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
 const NAV = {
   SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
-  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
+  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
   AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
   TechnicianIT: ['tickets', 'categories', 'locations'],
   TechnicianME: ['tickets', 'categories', 'locations'],
@@ -1777,7 +1777,7 @@ function reportInsights(p) {
 }
 
 // ==========================================================================
-// View: Users (SuperAdmin)
+// View: Users (SuperAdmin: all users · AdminIT: IT-side users only)
 // ==========================================================================
 async function renderUsers() {
   view().innerHTML = `<div class="page-head"><h2>Users</h2><p>Manage staff, roles & access</p></div>
@@ -1785,7 +1785,9 @@ async function renderUsers() {
     <div class="panel"><div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Dept</th><th>Access</th><th>Status</th><th></th></tr></thead><tbody id="u-body"><tr><td colspan="7" class="loading-inline">Loading…</td></tr></tbody></table></div></div>`;
   let all = [];
   const draw = (term = '') => {
-    const rows = all.filter((u) => !term || u.username.toLowerCase().includes(term) || u.email.toLowerCase().includes(term));
+    const rows = all
+      .filter((u) => canManageTargetRole(state.user.role, u.role))
+      .filter((u) => !term || u.username.toLowerCase().includes(term) || u.email.toLowerCase().includes(term));
     $('#u-body').innerHTML = rows.length ? rows.map(userRow).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">No users</td></tr>';
     $$('[data-edit]').forEach((b) => b.addEventListener('click', () => openUserModal(all.find((x) => x.id == b.dataset.edit), reload)));
     $$('[data-del]').forEach((b) => b.addEventListener('click', () => confirmDeleteUser(all.find((x) => x.id == b.dataset.del), reload)));
@@ -1810,6 +1812,18 @@ function userRow(u) {
   </tr>`;
 }
 const ALL_ROLES = ['Requestor', 'TechnicianIT', 'TechnicianME', 'AdminIT', 'AdminME', 'Leader', 'SuperAdmin'];
+// UX mirror of the backend RBAC (src/utils/permissions.js). AdminIT is scoped to
+// IT-side roles; SuperAdmin manages everyone. The server re-enforces this — these
+// helpers only shape the UI (list rows + role dropdown), never grant access.
+const ADMINIT_MANAGEABLE_ROLES = ['Requestor', 'TechnicianIT', 'AdminIT', 'Leader'];
+function canManageTargetRole(currentRole, targetRole) {
+  if (currentRole === 'SuperAdmin') return true;
+  if (currentRole === 'AdminIT') return ADMINIT_MANAGEABLE_ROLES.includes(targetRole);
+  return false;
+}
+function assignableRoles() {
+  return ALL_ROLES.filter((r) => canManageTargetRole(state.user.role, r));
+}
 async function openUserModal(u, after) {
   const isEdit = !!u;
   // Load reference data for the dropdowns (brands + outlets for PIC coverage).
@@ -1823,7 +1837,7 @@ async function openUserModal(u, after) {
   const v = await formModal(isEdit ? 'Edit user' : 'Add user', [
     { name: 'username', label: 'Full name', required: !isEdit, value: u ? u.username : '' },
     { name: 'email', label: 'Email', type: 'email', required: !isEdit, value: u ? u.email : '' },
-    { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: ALL_ROLES.map((r) => ({ value: r, label: r })) },
+    { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: assignableRoles().map((r) => ({ value: r, label: r })) },
     { name: 'brand', label: 'Brand', type: 'select', value: u ? (u.brand || '') : '', options: brandOptions, hint: 'Single brand access (leave None for requestors or all-brand staff).' },
     { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
     { name: 'region', label: 'Region', type: 'select', value: u ? (u.region || '') : '', options: regionOptions },

@@ -17,6 +17,31 @@ const isAdmin = (u) => ADMIN_ROLES.includes(u.role);
 const isTechnician = (u) =>
   u.role === "TechnicianIT" || u.role === "TechnicianME";
 
+// --- User-management RBAC (who may manage which target roles) --------------
+// SuperAdmin manages everyone. AdminIT is scoped to IT-side operational roles
+// only and can never touch SuperAdmin or the ME side (AdminME/TechnicianME).
+// These predicates are the server-side source of truth; the frontend mirrors
+// them purely for UX (hiding menus/roles), never for enforcement.
+const ADMINIT_MANAGEABLE_ROLES = [
+  "Requestor",
+  "TechnicianIT",
+  "AdminIT",
+  "Leader",
+];
+
+// May this role reach the Users module at all (list/create/edit)?
+function canManageUsers(currentUserRole) {
+  return currentUserRole === "SuperAdmin" || currentUserRole === "AdminIT";
+}
+
+// May `currentUserRole` create/edit/delete a user who has `targetRole`?
+function canManageTargetRole(currentUserRole, targetRole) {
+  if (currentUserRole === "SuperAdmin") return true;
+  if (currentUserRole === "AdminIT")
+    return ADMINIT_MANAGEABLE_ROLES.includes(targetRole);
+  return false;
+}
+
 // Can this user administer (edit/assign/close) this ticket's department?
 function adminScopeForTicket(u, ticket) {
   if (u.role === "SuperAdmin") return true;
@@ -158,4 +183,7 @@ module.exports = {
   getUserScope,
   getTechnicianScope,
   buildTicketScope,
+  ADMINIT_MANAGEABLE_ROLES,
+  canManageUsers,
+  canManageTargetRole,
 };

@@ -212,6 +212,39 @@ function openModal({ title, bodyHTML, footHTML, onMount, size }) {
   return { overlay, close };
 }
 
+// Image lightbox — opens an image attachment as an in-app preview overlay
+// instead of a raw browser tab. Bound once (below) via event delegation so it
+// works for images in the activity timeline and the Evidence panel alike, and
+// survives re-renders.
+function openImagePreview(url, name) {
+  const root = $('#modal-root');
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  overlay.innerHTML = `
+    <div class="lightbox">
+      <div class="lightbox-bar">
+        <span class="lightbox-name">${esc(name || 'Preview')}</span>
+        <a class="lightbox-btn" href="${esc(url)}" target="_blank" title="Open in new tab" aria-label="Open in new tab">↗</a>
+        <button class="lightbox-btn lightbox-close" aria-label="Close">&times;</button>
+      </div>
+      <img class="lightbox-img" src="${esc(url)}" alt="${esc(name || '')}">
+    </div>`;
+  root.appendChild(overlay);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { document.removeEventListener('keydown', onKey); overlay.remove(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  $('.lightbox-close', overlay).addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+}
+document.addEventListener('click', (e) => {
+  const link = e.target.closest && e.target.closest('a[data-preview]');
+  if (!link) return;
+  // Respect modifier/middle clicks — let them open in a new tab as usual.
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  openImagePreview(link.getAttribute('data-preview'), link.getAttribute('data-preview-name'));
+});
+
 // Keep Tab focus cycling inside the open modal
 function trapFocus(e, overlay) {
   const f = $$('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', overlay)
@@ -871,9 +904,16 @@ async function renderTicketDetail(id) {
   const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
   const canReply = u.role !== 'Leader';
 
+  // Group attachments by the comment they were posted with, so each reply's
+  // files render inline on its own timeline entry (openable via preview).
+  const attByComment = {};
+  for (const a of attachments) {
+    if (a.comment_id != null) (attByComment[a.comment_id] = attByComment[a.comment_id] || []).push(a);
+  }
+
   // Merge timeline
   const events = [
-    ...comments.map((c) => ({ t: c.created_at, kind: c.is_system ? 'sys' : 'msg', author: c.author_name, role: c.author_role, text: c.message })),
+    ...comments.map((c) => ({ t: c.created_at, kind: c.is_system ? 'sys' : 'msg', author: c.author_name, role: c.author_role, text: c.message, atts: attByComment[c.id] || [] })),
     ...activity.map((a) => ({ t: a.created_at, kind: 'sys', author: a.actor_name, role: a.actor_role, text: actionText(a) })),
   ].sort((a, b) => new Date(a.t) - new Date(b.t));
 
@@ -924,13 +964,14 @@ async function renderTicketDetail(id) {
 function actionText(a) { return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action); }
 function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
 function tlItem(e) {
-  if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
-  return `<div class="tl-item"><div class="tl-head"><span class="tl-author">${esc(e.author)}</span><span class="tl-role">${esc(e.role)}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
+  const atts = (e.atts && e.atts.length) ? `<div class="tl-atts">${e.atts.map(attCard).join('')}</div>` : '';
+  if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div>${atts}</div>`;
+  return `<div class="tl-item"><div class="tl-head"><span class="tl-author">${esc(e.author)}</span><span class="tl-role">${esc(e.role)}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div>${atts}</div>`;
 }
 function attCard(a) {
   const isImg = (a.mime_type || '').startsWith('image/');
   const phaseTag = a.phase && a.phase !== 'general' ? `<span class="phase-tag phase-${esc(a.phase)}">${esc(a.phase)}</span>` : '';
-  if (isImg) return `<a class="att-card" href="${esc(a.file_url)}" target="_blank" style="flex-direction:column;align-items:stretch;width:150px">${phaseTag}<img class="att-thumb" src="${esc(a.file_url)}" alt="${esc(a.file_name)}" loading="lazy"><span class="an">${esc(a.file_name)}</span></a>`;
+  if (isImg) return `<a class="att-card att-img" href="${esc(a.file_url)}" target="_blank" data-preview="${esc(a.file_url)}" data-preview-name="${esc(a.file_name)}" style="flex-direction:column;align-items:stretch;width:150px">${phaseTag}<img class="att-thumb" src="${esc(a.file_url)}" alt="${esc(a.file_name)}" loading="lazy"><span class="an">${esc(a.file_name)}</span></a>`;
   return `<a class="att-card" href="${esc(a.file_url)}" target="_blank">${svg('<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>', 16)}${phaseTag}<span class="an">${esc(a.file_name)}</span></a>`;
 }
 function replyBoxHTML() {

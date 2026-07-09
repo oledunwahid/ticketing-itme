@@ -399,9 +399,6 @@ function renderAuth() {
       <div class="field"><label>Password</label>${pwInput('li-pw', 'required autocomplete="current-password"')}</div>
       <label class="remember-row"><input type="checkbox" id="li-remember"><span>Remember me on this device</span></label>
       <button class="btn-primary btn-block" id="li-submit">Sign in</button>
-      <div class="auth-divider"><span>atau</span></div>
-      <a href="/quick-report" data-nav class="btn-outline btn-block" id="li-quick">Quick Report tanpa login</a>
-      <p class="hint auth-quick-copy">Untuk outlet yang hanya ingin membuat laporan cepat, gunakan Quick Report tanpa login.</p>
     </form>`;
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();

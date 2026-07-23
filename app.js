@@ -16,7 +16,7 @@ const morgan = require("morgan");
 const path = require("path");
 const cookieParser = require("cookie-parser");
 const db = require("./database");
-const { PORT } = require("./src/config/env");
+const { PORT, HOST } = require("./src/config/env");
 
 const app = express();
 
@@ -56,8 +56,8 @@ app.use((err, req, res, next) => {
 
 // --- Start (after DB is ready) ---------------------------------------------
 db.ready.then(() => {
-  app.listen(PORT, () => {
-    console.log(`IT-ME Ticketing server running at http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`IT-ME Ticketing server running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   });
 });
 

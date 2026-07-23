@@ -6,7 +6,9 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const bcrypt = require('bcryptjs');
 
-const dbPath = path.resolve(__dirname, 'tickets.db');
+const dbPath = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.resolve(__dirname, 'tickets.db');
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
@@ -671,6 +673,29 @@ async function runMigrations() {
     await run("UPDATE tickets SET source = 'authenticated' WHERE source IS NULL OR source = ''");
     await run('CREATE INDEX IF NOT EXISTS idx_tickets_source ON tickets(source)');
     await run('CREATE INDEX IF NOT EXISTS idx_tickets_track ON tickets(tracking_token_hash)');
+  });
+
+  // m015 — Multi-technician assignment support (Primary Technician + Collaborators)
+  await migrate('m015_multi_technician_assignment', async () => {
+    await addColumn('ticket_assignments', 'role_type', "TEXT DEFAULT 'primary'");
+    await addColumn('ticket_assignments', 'is_active', 'INTEGER DEFAULT 1');
+    await run("UPDATE ticket_assignments SET role_type = 'primary' WHERE role_type IS NULL OR role_type = ''");
+    await run("UPDATE ticket_assignments SET is_active = COALESCE(active, 1) WHERE is_active IS NULL");
+    await run('CREATE INDEX IF NOT EXISTS idx_assignments_ticket_active ON ticket_assignments(ticket_id, active)');
+    await run('CREATE INDEX IF NOT EXISTS idx_assignments_role_type ON ticket_assignments(role_type)');
+  });
+
+  // m016 — Seed user Edi (TechnicianIT)
+  await migrate('m016_seed_edi_user', async () => {
+    const existing = await get("SELECT id FROM users WHERE LOWER(username) = 'edi' OR LOWER(email) = 'edi@union.com'");
+    if (!existing) {
+      const pw = bcrypt.hashSync('Password123!', 10);
+      await run(
+        `INSERT INTO users (username, email, password_hash, role, department, all_brands, all_outlets, region, pic_area, is_active)
+         VALUES ('Edi', 'edi@union.com', ?, 'TechnicianIT', 'IT', 1, 1, 'Jakarta', 'IT Area', 1)`,
+        [pw]
+      );
+    }
   });
 }
 

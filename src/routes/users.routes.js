@@ -19,9 +19,9 @@ const {
 
 const router = express.Router();
 
-// Roles allowed into the Users module. SuperAdmin manages all users; AdminIT
-// manages IT-side users only (list/create/edit scoped by canManageTargetRole).
-const USER_MODULE_ROLES = ["SuperAdmin", "AdminIT"];
+// Roles allowed into the Users module. SuperAdmin manages all users; AdminIT/AdminME
+// manage their scoped department target roles via canManageTargetRole.
+const USER_MODULE_ROLES = ["SuperAdmin", "AdminIT", "AdminME"];
 
 router.get(
   "/api/users",

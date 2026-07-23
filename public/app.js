@@ -170,6 +170,7 @@ const api = {
   createUser: (b) => apiJSON('/api/users', { method: 'POST', body: JSON.stringify(b) }),
   patchUser: (id, b) => apiJSON('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
   delUser: (id) => apiJSON('/api/users/' + id, { method: 'DELETE' }),
+  changePassword: (b) => apiJSON('/api/auth/change-password', { method: 'POST', body: JSON.stringify(b) }),
 };
 
 async function loadOutlets() {
@@ -935,7 +936,8 @@ async function renderTicketDetail(id) {
             ${t.source === 'public_quick_report' ? '<dt>Source</dt><dd><span class="badge src-public">Public Quick Report</span></dd>' : ''}
             <dt>${t.source === 'public_quick_report' ? 'Reporter' : 'Requester'}</dt><dd>${esc(t.public_reporter_name || t.customer_name || '—')}</dd>
             <dt>Contact</dt><dd>${esc(t.public_reporter_contact || t.contact_number || '—')}</dd>
-            <dt>Assignee</dt><dd>${esc(t.assignee_name || 'Unassigned')}</dd>
+            <dt>Primary Tech</dt><dd>${primaryTechnician ? esc(primaryTechnician.technician_name) : esc(t.assignee_name || 'Unassigned')}</dd>
+            ${(collaborators && collaborators.length) ? `<dt>Collaborators</dt><dd>${collaborators.map(c => `<span class="badge" style="margin-right:4px">${esc(c.technician_name)}</span>`).join('')}</dd>` : ''}
             ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
             ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}
             ${t.location_detail ? `<dt>Location</dt><dd>${esc(t.location_detail)}</dd>` : ''}
@@ -1108,41 +1110,86 @@ async function openRerouteModal(t) {
   catch (e) { toast(e.message, 'error'); }
 }
 
-// Assignment modal with recommendation
+// Assignment modal with multi-technician support (Primary + Collaborators)
 async function openAssignModal(t, after) {
   const { overlay, close } = openModal({
-    title: 'Assign technician — ' + (t.ticket_number || '#' + t.id),
-    bodyHTML: `<div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
+    title: 'Manage Assignment — ' + (t.ticket_number || '#' + t.id),
+    bodyHTML: `<div id="cur-assign-box" class="mb"><div class="loading-inline">Loading current assignment status…</div></div>
+      <div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
       <div class="divider"></div>
-      <div class="field"><label>Manual override</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+      <div class="field"><label>Select Technician</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+      <div class="field"><label>Assignment Role</label>
+        <select id="assign-role-type">
+          <option value="primary">Primary Technician (PIC)</option>
+          <option value="collaborator">Collaborator / Additional Agent</option>
+        </select>
+      </div>
       <label class="row gap-sm" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>`,
-    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign selected</button>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign Selected</button>`,
     size: 'lg',
     async onMount(ov, close) {
       $('[data-cancel]', ov).addEventListener('click', close);
       try {
-        const [recs, techs] = await Promise.all([api.recommend(t.id), api.technicians(t.department)]);
+        const [ticketData, recs, techs] = await Promise.all([
+          api.ticket(t.id),
+          api.recommend(t.id).catch(() => []),
+          api.technicians(t.department).catch(() => []),
+        ]);
+
+        const curBox = $('#cur-assign-box', ov);
+        const activeAss = ticketData.activeAssignments || [];
+        if (activeAss.length) {
+          curBox.innerHTML = `
+            <div style="font-weight:600;margin-bottom:6px;font-size:.88rem">Active Technicians:</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              ${activeAss.map(a => `
+                <div style="background:var(--bg-muted, #1e293b);border:1px solid var(--border, #334155);padding:6px 10px;border-radius:6px;font-size:.82rem;display:flex;align-items:center;gap:6px">
+                  <span>${esc(a.technician_name)}</span>
+                  <span class="badge ${a.role_type === 'primary' ? 'badge-primary' : ''}">${a.role_type === 'primary' ? 'Primary' : 'Collaborator'}</span>
+                  <button type="button" class="btn-ghost" data-remove-tech="${a.technician_id}" style="padding:2px 6px;color:var(--danger, #ef4444);font-size:11px" title="Remove technician">✕</button>
+                </div>
+              `).join('')}
+            </div>`;
+          $$('[data-remove-tech]', ov).forEach(b => {
+            b.addEventListener('click', async () => {
+              try {
+                await api.assign(t.id, { technician_id: Number(b.dataset.removeTech), action: 'remove' });
+                toast('Technician assignment removed', 'info');
+                close();
+                if (after) after();
+              } catch (err) {
+                toast(err.message, 'error');
+              }
+            });
+          });
+        } else {
+          curBox.innerHTML = `<div class="muted" style="font-size:.84rem">No active technician assigned to this ticket.</div>`;
+        }
+
         const rb = $('#rec-box', ov);
         rb.innerHTML = recs.length ? recs.map((r, i) => `
           <div class="rec-item ${i === 0 && r.available ? 'best' : ''}">
             <div class="rec-info"><div class="rec-name">${esc(r.username)} ${i === 0 && r.available ? '⭐' : ''}</div><div class="rec-reasons">${esc(r.reasons.join(' · '))}</div></div>
             <span class="rec-avail ${r.available ? 'yes' : 'no'}">${r.available ? 'available' : 'busy'}</span>
-            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign</button>
+            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign Primary</button>
           </div>`).join('') : '<p class="muted">No technicians configured for this department.</p>';
+
         $('#manual-tech', ov).innerHTML = '<option value="">Choose technician…</option>' + techs.map((x) => `<option value="${x.id}">${esc(x.username)} (${x.workload} open)</option>`).join('');
-        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, false, close, after)));
+        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, 'primary', false, close, after)));
       } catch (e) { $('#rec-box', ov).innerHTML = errBox(e); }
+
       $('[data-manual]', ov).addEventListener('click', () => {
         const id = $('#manual-tech', ov).value; if (!id) { toast('Pick a technician', 'error'); return; }
-        doAssign(t, id, $('#ov-check', ov).checked, close, after);
+        const roleType = $('#assign-role-type', ov).value;
+        doAssign(t, id, roleType, $('#ov-check', ov).checked, close, after);
       });
     },
   });
 }
-async function doAssign(t, techId, override, close, after) {
+async function doAssign(t, techId, roleType, override, close, after) {
   try {
-    await api.assign(t.id, { technician_id: Number(techId), override });
-    toast('Technician assigned', 'success'); close(); if (after) after();
+    await api.assign(t.id, { technician_id: Number(techId), role_type: roleType || 'primary', override });
+    toast('Technician assignment updated', 'success'); close(); if (after) after();
   } catch (e) {
     if (/override/i.test(e.message)) toast(e.message + ' Tick the override box to force.', 'error');
     else toast(e.message, 'error');
@@ -1875,7 +1922,9 @@ async function openUserModal(u, after) {
   const regionOptions = [{ value: '', label: '— None —' }, ...REGIONS.map((r) => ({ value: r, label: r }))];
   const outletOptions = outlets.map((o) => ({ value: o.code, label: `${o.code}${o.region ? ' · ' + o.region : ''} (${o.brand_code})` }));
 
-  const v = await formModal(isEdit ? 'Edit user' : 'Add user', [
+  const isAdminOrSuper = ['SuperAdmin', 'AdminIT', 'AdminME'].includes(state.user ? state.user.role : '');
+
+  const fields = [
     { name: 'username', label: 'Full name', required: !isEdit, value: u ? u.username : '' },
     { name: 'email', label: 'Email', type: 'email', required: !isEdit, value: u ? u.email : '' },
     { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: assignableRoles().map((r) => ({ value: r, label: r })) },
@@ -1883,20 +1932,27 @@ async function openUserModal(u, after) {
     { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
     { name: 'region', label: 'Region', type: 'select', value: u ? (u.region || '') : '', options: regionOptions },
     { name: 'pic_area', label: 'PIC area (technician label, optional)', value: u ? (u.pic_area || '') : '', placeholder: 'e.g. IT Area 1' },
-    { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
-    { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
+    ...(isAdminOrSuper ? [
+      { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
+      { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
+    ] : []),
     { name: 'can_close_override', label: '', type: 'checkbox', checkboxLabel: 'Technician may close tickets', value: u ? !!u.can_close_override : false },
     { name: 'is_active', label: '', type: 'checkbox', checkboxLabel: 'Active', value: u ? !!u.is_active : true },
     { name: 'password', label: isEdit ? 'New password (blank = keep)' : 'Password', type: 'password', required: !isEdit, hint: 'Min 10 chars, upper/lower/number/special' },
-  ], isEdit ? 'Save' : 'Create');
+  ];
+
+  const v = await formModal(isEdit ? 'Edit user' : 'Add user', fields, isEdit ? 'Save' : 'Create');
   if (!v) return;
   const payload = {
     username: v.username, email: v.email, role: v.role,
     brand: v.brand || null, all_brands: v.all_brands,
     region: v.region || null, pic_area: v.pic_area || null,
-    outlet_access: v.outlet_access, all_outlets: v.all_outlets,
     can_close_override: v.can_close_override, is_active: v.is_active,
   };
+  if (isAdminOrSuper) {
+    payload.outlet_access = v.outlet_access || [];
+    payload.all_outlets = !!v.all_outlets;
+  }
   if (v.password) payload.password = v.password;
   try {
     if (isEdit) await api.patchUser(u.id, payload); else await api.createUser(payload);
@@ -2295,7 +2351,8 @@ async function openReportModal() {
   const optgroups = Object.entries(brandsGroups).map(([b, list]) => `<optgroup label="${esc(b)}">${list.map((o) => `<option value="${esc(o.code)}" ${o.code === lastOutlet ? 'selected' : ''}>${esc(o.code)}</option>`).join('')}</optgroup>`).join('');
   const isAdmin = ADMIN_ROLES.includes(state.user.role);
   const body = `
-    <div class="field"><label>Outlet <span class="req-star">*</span></label><select id="q-outlet"><option value="">Select outlet…</option>${optgroups}</select></div>
+    <div class="field"><label>Nama Requestor <span class="req-star">*</span></label><input id="q-reqname" placeholder="Name of requestor" value="${esc(state.user ? state.user.username : '')}"></div>
+    <div class="field"><label>Outlet / Location <span class="req-star">*</span></label><select id="q-outlet"><option value="">Select outlet…</option>${optgroups}</select></div>
     <div class="field"><label>Department <span class="req-star">*</span></label>
       <div class="segmented"><button type="button" class="seg-btn big" data-dept="IT">🖥️ IT</button><button type="button" class="seg-btn big" data-dept="ME">🔧 Mechanical</button></div></div>
     <div class="field"><label>Category <span class="req-star">*</span></label><select id="q-cat" disabled><option>Select department first</option></select></div>
@@ -2309,7 +2366,7 @@ async function openReportModal() {
     <div class="field"><label>What’s the issue? <span class="req-star">*</span></label><textarea id="q-desc" placeholder="e.g. POS terminal 2 not printing receipts"></textarea></div>
     <div class="field"><label>Urgency</label><div class="segmented" id="q-urg">${URGENCIES.map((u) => `<button type="button" class="seg-btn ${u === 'Medium' ? 'active' : ''}" data-urg="${u}">${u}</button>`).join('')}</div></div>
     <div class="field"><label>Contact / WhatsApp</label><input id="q-contact" placeholder="08xx…" inputmode="tel"></div>
-    ${isAdmin ? `<div class="field"><label>Report on behalf of (optional)</label><div class="field-row"><input id="q-cname" placeholder="Name"><input id="q-cemail" placeholder="Email" type="email"></div></div>` : ''}
+    ${isAdmin ? `<div class="field"><label>Report on behalf of email (optional)</label><div class="field-row"><input id="q-cemail" placeholder="Email" type="email"></div></div>` : ''}
     <button type="button" class="btn-ghost" id="q-more">▾ Add more details (optional)</button>
     <div id="q-extra" hidden>
       <div class="field"><label>Subject (optional)</label><input id="q-title" placeholder="Short subject line"></div>
@@ -2341,7 +2398,9 @@ async function openReportModal() {
       $('[data-cancel]', ov).addEventListener('click', close);
       const submit = $('#q-submit', ov);
       submit.addEventListener('click', async () => {
+        const reqName = $('#q-reqname', ov).value.trim();
         const outlet = $('#q-outlet', ov).value, cat = $('#q-cat', ov).value, desc = $('#q-desc', ov).value.trim();
+        if (!reqName) return toast('Nama Requestor is required', 'error');
         if (!outlet) return toast('Select an outlet', 'error');
         if (!dept) return toast('Choose IT or Mechanical', 'error');
         if (!cat) return toast('Select a category', 'error');
@@ -2349,6 +2408,7 @@ async function openReportModal() {
         if (quickUploader.uploading()) return toast('Wait for uploads to finish', 'error');
         submit.disabled = true; submit.textContent = 'Submitting…';
         const payload = {
+          requestor_name: reqName, customer_name: reqName,
           department: dept, outlet_code: outlet, category: cat, description: desc, urgency: urg,
           contact_number: $('#q-contact', ov).value.trim(), report_mode: $('#q-extra', ov).hidden ? 'quick' : 'detailed',
           attachmentIds: quickUploader.ids(),
@@ -2361,7 +2421,7 @@ async function openReportModal() {
           scheduled_at: $('#q-sched', ov) ? $('#q-sched', ov).value : '',
           scheduled_end: $('#q-sched-end', ov) ? $('#q-sched-end', ov).value : '',
         };
-        if (isAdmin) { payload.customer_name = $('#q-cname', ov).value.trim(); payload.customer_email = $('#q-cemail', ov).value.trim(); }
+        if (isAdmin && $('#q-cemail', ov)) { payload.customer_email = $('#q-cemail', ov).value.trim(); }
         try {
           const t = await api.createTicket(payload);
           localStorage.setItem('lastOutlet', outlet);
@@ -2394,6 +2454,61 @@ async function doLogout() {
   navigate('/login');
   toast('Signed out', 'info');
 }
+function openChangePasswordModal() {
+  const { overlay, close } = openModal({
+    title: 'Change Password',
+    bodyHTML: `
+      <form id="form-change-pw">
+        <p class="muted mb" style="font-size:.85rem">Update your account password securely.</p>
+        <div class="field">
+          <label>Current Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-old" required placeholder="Enter current password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+        </div>
+        <div class="field mt">
+          <label>New Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-new" required placeholder="Enter new password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+          <span class="hint">Min 10 characters, including uppercase, lowercase, numbers, and special characters.</span>
+        </div>
+        <div class="field mt">
+          <label>Confirm New Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-confirm" required placeholder="Re-enter new password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+        </div>
+      </form>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" id="btn-save-pw">Update Password</button>`,
+    size: 'md',
+    onMount(ov, close) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      $('#btn-save-pw', ov).addEventListener('click', async () => {
+        const oldPassword = $('#pw-old', ov).value;
+        const newPassword = $('#pw-new', ov).value;
+        const confirmPassword = $('#pw-confirm', ov).value;
+        if (!oldPassword || !newPassword || !confirmPassword) return toast('All password fields are required', 'error');
+        if (newPassword !== confirmPassword) return toast('New password and confirmation do not match', 'error');
+
+        const btn = $('#btn-save-pw', ov);
+        btn.disabled = true; btn.textContent = 'Updating…';
+        try {
+          await api.changePassword({ oldPassword, newPassword, confirmPassword });
+          toast('Password changed successfully!', 'success');
+          close();
+        } catch (e) {
+          toast(e.message || 'Failed to change password', 'error');
+          btn.disabled = false; btn.textContent = 'Update Password';
+        }
+      });
+    }
+  });
+}
+
 function initTheme() {
   const saved = localStorage.getItem('theme');
   // Explicit saved choice wins; otherwise follow the OS preference.
@@ -2413,6 +2528,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#drawer-close').addEventListener('click', closeDrawer);
   $('#drawer-overlay').addEventListener('click', closeDrawer);
   $('#btn-logout').addEventListener('click', doLogout);
+  const btnCp = $('#btn-change-password');
+  if (btnCp) btnCp.addEventListener('click', openChangePasswordModal);
   $('#btn-report-quick').addEventListener('click', () => openReportModal());
   $('#btn-theme').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark'); updateThemeIcons(); });
   // Delegate auth-screen nav links

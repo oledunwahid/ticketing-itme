@@ -28,10 +28,20 @@ const ADMINIT_MANAGEABLE_ROLES = [
   "AdminIT",
   "Leader",
 ];
+const ADMINME_MANAGEABLE_ROLES = [
+  "Requestor",
+  "TechnicianME",
+  "AdminME",
+  "Leader",
+];
 
 // May this role reach the Users module at all (list/create/edit)?
 function canManageUsers(currentUserRole) {
-  return currentUserRole === "SuperAdmin" || currentUserRole === "AdminIT";
+  return (
+    currentUserRole === "SuperAdmin" ||
+    currentUserRole === "AdminIT" ||
+    currentUserRole === "AdminME"
+  );
 }
 
 // May `currentUserRole` create/edit/delete a user who has `targetRole`?
@@ -39,6 +49,8 @@ function canManageTargetRole(currentUserRole, targetRole) {
   if (currentUserRole === "SuperAdmin") return true;
   if (currentUserRole === "AdminIT")
     return ADMINIT_MANAGEABLE_ROLES.includes(targetRole);
+  if (currentUserRole === "AdminME")
+    return ADMINME_MANAGEABLE_ROLES.includes(targetRole);
   return false;
 }
 

@@ -15,6 +15,10 @@ const STATUSES = [
   "Closed",
   "Cancelled",
 ];
+// Core simplified daily-workflow statuses (New → Open → On Progress → Closed).
+// The full STATUSES list above is retained in the DB for reporting, SLA and
+// operational detail; CORE_STATUSES is only the visible/enforced daily flow.
+const CORE_STATUSES = ["New", "Open", "On Progress", "Closed"];
 const URGENCIES = ["Low", "Medium", "High", "Critical"];
 const DEPARTMENTS = ["IT", "ME"];
 const ADMIN_ROLES = ["SuperAdmin", "AdminIT", "AdminME"];
@@ -32,6 +36,7 @@ const SLA_TARGET_MINUTES = {
 
 module.exports = {
   STATUSES,
+  CORE_STATUSES,
   URGENCIES,
   DEPARTMENTS,
   ADMIN_ROLES,

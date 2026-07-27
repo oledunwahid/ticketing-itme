@@ -6,6 +6,9 @@
 // ---- Domain constants (mirror backend) ----
 const STATUSES = ['New', 'Open', 'Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart',
   'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'];
+// Core simplified daily-workflow statuses shown in the ticket status control.
+// Full STATUSES is kept for filters/reporting; CORE_STATUSES is the daily flow.
+const CORE_STATUSES = ['New', 'Open', 'On Progress', 'Closed'];
 const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
 const REGIONS = ['Jakarta', 'Surabaya'];
 const TECH_STATUSES = ['On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
@@ -13,23 +16,23 @@ const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
 const NAV = {
-  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
-  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
-  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
-  TechnicianIT: ['tickets', 'categories', 'locations'],
-  TechnicianME: ['tickets', 'categories', 'locations'],
+  SuperAdmin: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
+  AdminIT: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
+  AdminME: ['dashboard', 'tickets', 'schedules', 'reports', 'categories', 'locations', 'importexport'],
+  TechnicianIT: ['tickets', 'categories'],
+  TechnicianME: ['tickets', 'categories'],
   Requestor: ['tickets'],
   Leader: ['dashboard', 'tickets', 'reports'],
 };
 const NAV_META = {
   dashboard: { label: 'Dashboard', icon: 'grid' },
   tickets: { label: 'Tickets', icon: 'ticket' },
-  queue: { label: 'Queue', icon: 'inbox' },
   schedules: { label: 'Schedules', icon: 'calendar' },
   reports: { label: 'Reporting & Performance', icon: 'chart' },
   users: { label: 'Users', icon: 'users' },
   categories: { label: 'Categories', icon: 'tag' },
   locations: { label: 'Locations', icon: 'mapPin' },
+  importexport: { label: 'Import / Export', icon: 'swap' },
 };
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
@@ -40,6 +43,7 @@ const ICONS = {
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
   tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
   mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+  swap: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
 };
 
 // ---- State ----
@@ -167,9 +171,11 @@ const api = {
   report: (qs) => apiJSON('/api/reports/tickets' + (qs ? '?' + qs : '')),
   performance: (qs) => apiJSON('/api/reports/performance' + (qs ? '?' + qs : '')),
   users: () => apiJSON('/api/users'),
+  importData: (module, csv, dryRun) => apiJSON('/api/import/' + module, { method: 'POST', body: JSON.stringify({ csv, dryRun }) }),
   createUser: (b) => apiJSON('/api/users', { method: 'POST', body: JSON.stringify(b) }),
   patchUser: (id, b) => apiJSON('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
   delUser: (id) => apiJSON('/api/users/' + id, { method: 'DELETE' }),
+  changePassword: (b) => apiJSON('/api/auth/change-password', { method: 'POST', body: JSON.stringify(b) }),
 };
 
 async function loadOutlets() {
@@ -211,6 +217,39 @@ function openModal({ title, bodyHTML, footHTML, onMount, size }) {
   if (first) setTimeout(() => first.focus(), 20);
   return { overlay, close };
 }
+
+// Image lightbox — opens an image attachment as an in-app preview overlay
+// instead of a raw browser tab. Bound once (below) via event delegation so it
+// works for images in the activity timeline and the Evidence panel alike, and
+// survives re-renders.
+function openImagePreview(url, name) {
+  const root = $('#modal-root');
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  overlay.innerHTML = `
+    <div class="lightbox">
+      <div class="lightbox-bar">
+        <span class="lightbox-name">${esc(name || 'Preview')}</span>
+        <a class="lightbox-btn" href="${esc(url)}" target="_blank" title="Open in new tab" aria-label="Open in new tab">↗</a>
+        <button class="lightbox-btn lightbox-close" aria-label="Close">&times;</button>
+      </div>
+      <img class="lightbox-img" src="${esc(url)}" alt="${esc(name || '')}">
+    </div>`;
+  root.appendChild(overlay);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { document.removeEventListener('keydown', onKey); overlay.remove(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  $('.lightbox-close', overlay).addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+}
+document.addEventListener('click', (e) => {
+  const link = e.target.closest && e.target.closest('a[data-preview]');
+  if (!link) return;
+  // Respect modifier/middle clicks — let them open in a new tab as usual.
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  openImagePreview(link.getAttribute('data-preview'), link.getAttribute('data-preview-name'));
+});
 
 // Keep Tab focus cycling inside the open modal
 function trapFocus(e, overlay) {
@@ -648,12 +687,12 @@ async function route() {
   const map = {
     dashboard: renderDashboard,
     tickets: renderTickets,
-    queue: renderQueue,
     schedules: renderSchedules,
     reports: renderReports,
     users: renderUsers,
     categories: renderCategories,
-    locations: renderLocations
+    locations: renderLocations,
+    importexport: renderImportExport
   };
   (map[name] || renderDashboard)();
 }
@@ -667,7 +706,7 @@ function renderAccessDenied() {
         <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
       </svg>
       <h3 style="color:var(--danger);font-size:1.35rem;margin-bottom:8px">Access Denied</h3>
-      <p class="muted" style="max-width:380px;margin:0 auto 20px">You do not have the required permissions to access the Category Creation Menu.</p>
+      <p class="muted" style="max-width:380px;margin:0 auto 20px">You do not have the required permissions to access this page.</p>
       <button class="btn-primary" id="btn-denied-home">Go to Tickets</button>
     </div>`;
   $('#btn-denied-home').addEventListener('click', () => navigate('/tickets'));
@@ -690,14 +729,24 @@ async function renderDashboard() {
   try {
     const d = await api.dashboard();
     const T = d.totals;
+    // Admin summary cards — counts are role-scoped by the backend (AdminIT → IT,
+    // AdminME → ME, SuperAdmin/Leader → all). Cards drill into the filtered list.
+    const deptCount = (dep) => ((d.byDept || []).find((x) => x.department === dep) || {}).c || 0;
+    const deptCards = state.user.role === 'AdminIT' ? ['IT'] : state.user.role === 'AdminME' ? ['ME'] : ['IT', 'ME'];
+    const st = (s) => '/tickets?status=' + encodeURIComponent(s);
     $('#d-stats').innerHTML = `
-      ${statCard(T.total, 'Total tickets', 'primary')}
-      ${statCard(T.open, 'Open', 'warn')}
-      ${statCard(T.unassigned, 'Unassigned', 'danger')}
-      ${statCard(T.on_scheduled || 0, 'On Scheduled')}
-      ${statCard(T.waiting, 'Waiting parts/vendor')}
-      ${statCard(d.avg_resolution_hours != null ? d.avg_resolution_hours + 'h' : '—', 'Avg resolution', 'ok')}`;
+      ${dashCard(T.new || 0, 'New', 'primary', st('New'))}
+      ${dashCard(T.open || 0, 'Open', 'warn', st('Open'))}
+      ${dashCard(T.on_progress || 0, 'On Progress', 'warn', st('On Progress'))}
+      ${dashCard(T.closed || 0, 'Closed', 'ok', st('Closed'))}
+      ${dashCard(T.unassigned || 0, 'Unassigned', 'danger', '/tickets?assigned=no')}
+      ${deptCards.map((dep) => dashCard(deptCount(dep), dep + ' tickets', 'primary', '/tickets?department=' + dep)).join('')}`;
     animateCounters($('#d-stats'));
+    $$('#d-stats [data-goto]').forEach((el) => {
+      const go = () => navigate(el.dataset.goto);
+      el.addEventListener('click', go);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    });
     const distMax = Math.max(1, ...d.byStatus.map((s) => s.c));
     // Dashboard stays glanceable: a compact SLA snapshot only. The full SLA/KPI
     // analysis, technician performance and manager insights live in the
@@ -743,6 +792,10 @@ async function renderDashboard() {
   } catch (e) { $('#d-rest').innerHTML = errBox(e); }
 }
 function statCard(n, l, accent) { return `<div class="stat ${accent ? 'accent-' + accent : ''}"><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`; }
+// Clickable dashboard summary card. `goto` is an in-app path the card links to.
+function dashCard(n, l, accent, goto) {
+  return `<div class="stat ${accent ? 'accent-' + accent : ''}${goto ? ' stat-click' : ''}"${goto ? ` data-goto="${esc(goto)}" role="button" tabindex="0"` : ''}><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`;
+}
 // Count-up animation for numeric stat values (preserves any suffix like "h")
 function animateCounters(root) {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -768,7 +821,7 @@ function skeletonStats() { return Array(5).fill('<div class="stat"><span class="
 // View: Tickets list
 // ==========================================================================
 // scope = technician PIC filter; sort = created_asc (default) | created_desc | urgency
-const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '' };
+const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' };
 const TECH_SCOPES = [
   { value: '', label: 'My PIC outlets' },
   { value: 'mine', label: 'Assigned to me' },
@@ -776,6 +829,16 @@ const TECH_SCOPES = [
   { value: 'all', label: 'All allowed tickets' },
 ];
 async function renderTickets() {
+  // Deep-link filters (e.g. from a dashboard card → /tickets?status=New). Start
+  // from a clean filter set, apply the query-string keys, then tidy the URL.
+  const sp = new URLSearchParams(location.search);
+  if ([...sp.keys()].length) {
+    Object.assign(listFilters, { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' });
+    for (const k of ['status', 'department', 'urgency', 'region', 'assigned']) {
+      if (sp.has(k)) listFilters[k] = sp.get(k);
+    }
+    history.replaceState(null, '', '/tickets');
+  }
   const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
   const showRegion = ['SuperAdmin', 'AdminIT', 'AdminME', 'Leader'].includes(state.user.role);
   const isTech = state.user.role.startsWith('Technician');
@@ -837,26 +900,6 @@ function ticketRow(t) {
 }
 
 // ==========================================================================
-// View: Queue (admins) — unassigned / new
-// ==========================================================================
-async function renderQueue() {
-  view().innerHTML = `<div class="page-head"><h2>Queue</h2><p>New & unassigned tickets awaiting dispatch</p></div><div id="queue-list" class="ticket-list">${skeletonRows()}</div>`;
-  try {
-    const all = await api.tickets();
-    const rows = all.filter((t) => !t.assigned_technician_id && !['Closed', 'Cancelled', 'Resolved'].includes(t.status));
-    const box = $('#queue-list');
-    if (!rows.length) { box.innerHTML = emptyBox('inbox', 'Queue is clear', 'No unassigned tickets right now. 🎉'); return; }
-    box.innerHTML = rows.map((t) => `<div class="ticket-row" data-id="${t.id}">
-      <div>${deptTag(t.department)}</div>
-      <div style="min-width:0"><div class="tnum">${esc(t.ticket_number)}</div><div class="ttitle">${esc(t.title)}</div>
-        <div class="tmeta"><span>${esc(t.outlet_code)}</span><span>${esc(t.category)}</span><span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div></div>
-      <div class="tbadges">${urgBadge(t.urgency)}<button class="btn-primary" data-assign="${t.id}" style="padding:7px 12px">Assign</button></div></div>`).join('');
-    $$('.ticket-row', box).forEach((el) => el.addEventListener('click', (e) => { if (e.target.closest('[data-assign]')) return; navigate('/tickets/' + el.dataset.id); }));
-    $$('[data-assign]', box).forEach((b) => b.addEventListener('click', async (e) => { e.stopPropagation(); const t = rows.find((x) => x.id == b.dataset.assign); await openAssignModal(t, () => renderQueue()); }));
-  } catch (e) { $('#queue-list').innerHTML = errBox(e); }
-}
-
-// ==========================================================================
 // View: Ticket detail
 // ==========================================================================
 let detailUploader = null;
@@ -865,15 +908,22 @@ async function renderTicketDetail(id) {
   let data;
   try { data = await api.ticket(id); }
   catch (e) { view().innerHTML = `<div class="page-head"><a href="/tickets" data-nav class="muted">← Back</a></div>${errBox(e)}`; wireNavLinks(); return; }
-  const { ticket: t, comments, activity, attachments, assignments } = data;
+  const { ticket: t, comments, activity, attachments, assignments, primaryTechnician, collaborators } = data;
   const u = state.user;
   const isDeptAdmin = u.role === 'SuperAdmin' || (u.role === 'AdminIT' && t.department === 'IT') || (u.role === 'AdminME' && t.department === 'ME');
   const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
   const canReply = u.role !== 'Leader';
 
+  // Group attachments by the comment they were posted with, so each reply's
+  // files render inline on its own timeline entry (openable via preview).
+  const attByComment = {};
+  for (const a of attachments) {
+    if (a.comment_id != null) (attByComment[a.comment_id] = attByComment[a.comment_id] || []).push(a);
+  }
+
   // Merge timeline
   const events = [
-    ...comments.map((c) => ({ t: c.created_at, kind: c.is_system ? 'sys' : 'msg', author: c.author_name, role: c.author_role, text: c.message })),
+    ...comments.map((c) => ({ t: c.created_at, kind: c.is_system ? 'sys' : 'msg', author: c.author_name, role: c.author_role, text: c.message, atts: attByComment[c.id] || [] })),
     ...activity.map((a) => ({ t: a.created_at, kind: 'sys', author: a.actor_name, role: a.actor_role, text: actionText(a) })),
   ].sort((a, b) => new Date(a.t) - new Date(b.t));
 
@@ -881,21 +931,27 @@ async function renderTicketDetail(id) {
     <div class="page-head"><a href="/tickets" data-nav class="muted">← Back to list</a></div>
     <div class="detail-top">
       <div style="flex:1;min-width:0">
-        <div class="tnum">${esc(t.ticket_number || '#' + t.id)} · ${deptTag(t.department)} ${esc(t.category || '')}</div>
+        <div class="tnum">${esc(t.ticket_number || '#' + t.id)}${t.outlet_name ? ' - ' + esc(t.outlet_name) : ''}</div>
         <h2>${esc(t.title)}</h2>
+        <div class="detail-headline">${deptTag(t.department)} <span class="muted">${esc(t.category || '—')}</span> · ${badge(t.status)} · ${urgBadge(t.urgency)}</div>
         <div class="aging ${agingClass(t)}">Reported ${fmtDate(t.created_at)} · ${timeAgo(t.created_at)}</div>
       </div>
-      <div class="detail-badges">${urgBadge(t.urgency)}${badge(t.status)}${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
+      <div class="detail-badges">${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
     </div>
     <div class="detail-grid">
       <div>
         <div class="card mb">
           <dl class="info-list">
-            <dt>Outlet</dt><dd>${esc(t.outlet_code || '—')} ${t.brand_code ? '· ' + esc(t.brand_code) : ''}</dd>
+            <dt>Outlet</dt><dd>${esc(t.outlet_name || t.outlet_code || '—')}${(t.outlet_name && t.outlet_code && t.outlet_name !== t.outlet_code) ? ` <span class="muted">(${esc(t.outlet_code)})</span>` : ''}${t.brand_code ? ' · ' + esc(t.brand_code) : ''}</dd>
+            <dt>Department</dt><dd>${deptTag(t.department)}</dd>
+            <dt>Category</dt><dd>${esc(t.category || '—')}</dd>
+            <dt>Status</dt><dd>${badge(t.status)}</dd>
             ${t.source === 'public_quick_report' ? '<dt>Source</dt><dd><span class="badge src-public">Public Quick Report</span></dd>' : ''}
             <dt>${t.source === 'public_quick_report' ? 'Reporter' : 'Requester'}</dt><dd>${esc(t.public_reporter_name || t.customer_name || '—')}</dd>
             <dt>Contact</dt><dd>${esc(t.public_reporter_contact || t.contact_number || '—')}</dd>
-            <dt>Assignee</dt><dd>${esc(t.assignee_name || 'Unassigned')}</dd>
+            <dt>Primary Technician / PIC</dt><dd>${primaryTechnician ? `${esc(primaryTechnician.technician_name)} <span class="badge badge-pic">PIC / Primary</span>` : (t.assignee_name && t.assignee_name !== 'Unassigned' ? `${esc(t.assignee_name)} <span class="badge badge-pic">PIC / Primary</span>` : '<span class="muted">Unassigned</span>')}</dd>
+            ${(collaborators && collaborators.length) ? `<dt>Collaborators</dt><dd>${collaborators.map(c => `<span class="badge badge-collab" style="margin-right:4px">${esc(c.technician_name)} · Collaborator</span>`).join('')}</dd>` : ''}
+            <dt>Created</dt><dd>${fmtDate(t.created_at)}</dd>
             ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
             ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}
             ${t.location_detail ? `<dt>Location</dt><dd>${esc(t.location_detail)}</dd>` : ''}
@@ -924,13 +980,14 @@ async function renderTicketDetail(id) {
 function actionText(a) { return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action); }
 function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
 function tlItem(e) {
-  if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
-  return `<div class="tl-item"><div class="tl-head"><span class="tl-author">${esc(e.author)}</span><span class="tl-role">${esc(e.role)}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div></div>`;
+  const atts = (e.atts && e.atts.length) ? `<div class="tl-atts">${e.atts.map(attCard).join('')}</div>` : '';
+  if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div>${atts}</div>`;
+  return `<div class="tl-item"><div class="tl-head"><span class="tl-author">${esc(e.author)}</span><span class="tl-role">${esc(e.role)}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div>${atts}</div>`;
 }
 function attCard(a) {
   const isImg = (a.mime_type || '').startsWith('image/');
   const phaseTag = a.phase && a.phase !== 'general' ? `<span class="phase-tag phase-${esc(a.phase)}">${esc(a.phase)}</span>` : '';
-  if (isImg) return `<a class="att-card" href="${esc(a.file_url)}" target="_blank" style="flex-direction:column;align-items:stretch;width:150px">${phaseTag}<img class="att-thumb" src="${esc(a.file_url)}" alt="${esc(a.file_name)}" loading="lazy"><span class="an">${esc(a.file_name)}</span></a>`;
+  if (isImg) return `<a class="att-card att-img" href="${esc(a.file_url)}" target="_blank" data-preview="${esc(a.file_url)}" data-preview-name="${esc(a.file_name)}" style="flex-direction:column;align-items:stretch;width:150px">${phaseTag}<img class="att-thumb" src="${esc(a.file_url)}" alt="${esc(a.file_name)}" loading="lazy"><span class="an">${esc(a.file_name)}</span></a>`;
   return `<a class="att-card" href="${esc(a.file_url)}" target="_blank">${svg('<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>', 16)}${phaseTag}<span class="an">${esc(a.file_name)}</span></a>`;
 }
 function replyBoxHTML() {
@@ -982,8 +1039,14 @@ function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
     html += `<div class="field"><label>Assignment</label><div class="row"><div style="flex:1">${esc(t.assignee_name || 'Unassigned')}</div><button class="btn-outline" id="btn-assign" style="padding:7px 12px">${t.assigned_technician_id ? 'Reassign' : 'Assign'}</button></div></div>`;
   }
   // Status controls
-  const opts = isDeptAdmin ? STATUSES : TECH_STATUSES;
-  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
+  // Simplified daily flow (New → Open → On Progress → Closed) for both admins and
+  // technicians. The ticket's own status is always kept as an option so a ticket
+  // sitting in a legacy status (e.g. Waiting Sparepart) is never silently
+  // overwritten and can still move forward; admins additionally keep Cancelled.
+  const opts = [...CORE_STATUSES];
+  if (!opts.includes(t.status)) opts.push(t.status);
+  if (isDeptAdmin && !opts.includes('Cancelled')) opts.push('Cancelled');
+  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`;
   if (isDeptAdmin) {
     html += `<div class="field"><label>Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
   }
@@ -1067,41 +1130,86 @@ async function openRerouteModal(t) {
   catch (e) { toast(e.message, 'error'); }
 }
 
-// Assignment modal with recommendation
+// Assignment modal with multi-technician support (Primary + Collaborators)
 async function openAssignModal(t, after) {
   const { overlay, close } = openModal({
-    title: 'Assign technician — ' + (t.ticket_number || '#' + t.id),
-    bodyHTML: `<div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
+    title: 'Manage Assignment — ' + (t.ticket_number || '#' + t.id),
+    bodyHTML: `<div id="cur-assign-box" class="mb"><div class="loading-inline">Loading current assignment status…</div></div>
+      <div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
       <div class="divider"></div>
-      <div class="field"><label>Manual override</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+      <div class="field"><label>Select Technician</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+      <div class="field"><label>Assignment Role</label>
+        <select id="assign-role-type">
+          <option value="primary">Primary Technician (PIC)</option>
+          <option value="collaborator">Collaborator / Additional Agent</option>
+        </select>
+      </div>
       <label class="row gap-sm" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>`,
-    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign selected</button>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign Selected</button>`,
     size: 'lg',
     async onMount(ov, close) {
       $('[data-cancel]', ov).addEventListener('click', close);
       try {
-        const [recs, techs] = await Promise.all([api.recommend(t.id), api.technicians(t.department)]);
+        const [ticketData, recs, techs] = await Promise.all([
+          api.ticket(t.id),
+          api.recommend(t.id).catch(() => []),
+          api.technicians(t.department).catch(() => []),
+        ]);
+
+        const curBox = $('#cur-assign-box', ov);
+        const activeAss = ticketData.activeAssignments || [];
+        if (activeAss.length) {
+          curBox.innerHTML = `
+            <div style="font-weight:600;margin-bottom:6px;font-size:.88rem">Active Technicians:</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              ${activeAss.map(a => `
+                <div style="background:var(--bg-muted, #1e293b);border:1px solid var(--border, #334155);padding:6px 10px;border-radius:6px;font-size:.82rem;display:flex;align-items:center;gap:6px">
+                  <span>${esc(a.technician_name)}</span>
+                  <span class="badge ${a.role_type === 'primary' ? 'badge-primary' : ''}">${a.role_type === 'primary' ? 'Primary' : 'Collaborator'}</span>
+                  <button type="button" class="btn-ghost" data-remove-tech="${a.technician_id}" style="padding:2px 6px;color:var(--danger, #ef4444);font-size:11px" title="Remove technician">✕</button>
+                </div>
+              `).join('')}
+            </div>`;
+          $$('[data-remove-tech]', ov).forEach(b => {
+            b.addEventListener('click', async () => {
+              try {
+                await api.assign(t.id, { technician_id: Number(b.dataset.removeTech), action: 'remove' });
+                toast('Technician assignment removed', 'info');
+                close();
+                if (after) after();
+              } catch (err) {
+                toast(err.message, 'error');
+              }
+            });
+          });
+        } else {
+          curBox.innerHTML = `<div class="muted" style="font-size:.84rem">No active technician assigned to this ticket.</div>`;
+        }
+
         const rb = $('#rec-box', ov);
         rb.innerHTML = recs.length ? recs.map((r, i) => `
           <div class="rec-item ${i === 0 && r.available ? 'best' : ''}">
             <div class="rec-info"><div class="rec-name">${esc(r.username)} ${i === 0 && r.available ? '⭐' : ''}</div><div class="rec-reasons">${esc(r.reasons.join(' · '))}</div></div>
             <span class="rec-avail ${r.available ? 'yes' : 'no'}">${r.available ? 'available' : 'busy'}</span>
-            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign</button>
+            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign Primary</button>
           </div>`).join('') : '<p class="muted">No technicians configured for this department.</p>';
+
         $('#manual-tech', ov).innerHTML = '<option value="">Choose technician…</option>' + techs.map((x) => `<option value="${x.id}">${esc(x.username)} (${x.workload} open)</option>`).join('');
-        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, false, close, after)));
+        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, 'primary', false, close, after)));
       } catch (e) { $('#rec-box', ov).innerHTML = errBox(e); }
+
       $('[data-manual]', ov).addEventListener('click', () => {
         const id = $('#manual-tech', ov).value; if (!id) { toast('Pick a technician', 'error'); return; }
-        doAssign(t, id, $('#ov-check', ov).checked, close, after);
+        const roleType = $('#assign-role-type', ov).value;
+        doAssign(t, id, roleType, $('#ov-check', ov).checked, close, after);
       });
     },
   });
 }
-async function doAssign(t, techId, override, close, after) {
+async function doAssign(t, techId, roleType, override, close, after) {
   try {
-    await api.assign(t.id, { technician_id: Number(techId), override });
-    toast('Technician assigned', 'success'); close(); if (after) after();
+    await api.assign(t.id, { technician_id: Number(techId), role_type: roleType || 'primary', override });
+    toast('Technician assignment updated', 'success'); close(); if (after) after();
   } catch (e) {
     if (/override/i.test(e.message)) toast(e.message + ' Tick the override box to force.', 'error');
     else toast(e.message, 'error');
@@ -1777,7 +1885,7 @@ function reportInsights(p) {
 }
 
 // ==========================================================================
-// View: Users (SuperAdmin)
+// View: Users (SuperAdmin: all users · AdminIT: IT-side users only)
 // ==========================================================================
 async function renderUsers() {
   view().innerHTML = `<div class="page-head"><h2>Users</h2><p>Manage staff, roles & access</p></div>
@@ -1785,7 +1893,9 @@ async function renderUsers() {
     <div class="panel"><div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Dept</th><th>Access</th><th>Status</th><th></th></tr></thead><tbody id="u-body"><tr><td colspan="7" class="loading-inline">Loading…</td></tr></tbody></table></div></div>`;
   let all = [];
   const draw = (term = '') => {
-    const rows = all.filter((u) => !term || u.username.toLowerCase().includes(term) || u.email.toLowerCase().includes(term));
+    const rows = all
+      .filter((u) => canManageTargetRole(state.user.role, u.role))
+      .filter((u) => !term || u.username.toLowerCase().includes(term) || u.email.toLowerCase().includes(term));
     $('#u-body').innerHTML = rows.length ? rows.map(userRow).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">No users</td></tr>';
     $$('[data-edit]').forEach((b) => b.addEventListener('click', () => openUserModal(all.find((x) => x.id == b.dataset.edit), reload)));
     $$('[data-del]').forEach((b) => b.addEventListener('click', () => confirmDeleteUser(all.find((x) => x.id == b.dataset.del), reload)));
@@ -1800,7 +1910,6 @@ function userRow(u) {
   let access = u.all_brands ? 'All brands' : (u.brand || '—');
   if (u.all_outlets) access += ' · all outlets';
   else if (u.outlet_access && u.outlet_access.length) access += ` · ${u.outlet_access.length} PIC outlet(s)`;
-  if (u.region) access += ` · ${u.region}`;
   return `<tr>
     <td><strong>${esc(u.username)}</strong> ${self ? '<span class="muted">(you)</span>' : ''}</td>
     <td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.department || '—')}</td>
@@ -1810,6 +1919,18 @@ function userRow(u) {
   </tr>`;
 }
 const ALL_ROLES = ['Requestor', 'TechnicianIT', 'TechnicianME', 'AdminIT', 'AdminME', 'Leader', 'SuperAdmin'];
+// UX mirror of the backend RBAC (src/utils/permissions.js). AdminIT is scoped to
+// IT-side roles; SuperAdmin manages everyone. The server re-enforces this — these
+// helpers only shape the UI (list rows + role dropdown), never grant access.
+const ADMINIT_MANAGEABLE_ROLES = ['Requestor', 'TechnicianIT', 'AdminIT', 'Leader'];
+function canManageTargetRole(currentRole, targetRole) {
+  if (currentRole === 'SuperAdmin') return true;
+  if (currentRole === 'AdminIT') return ADMINIT_MANAGEABLE_ROLES.includes(targetRole);
+  return false;
+}
+function assignableRoles() {
+  return ALL_ROLES.filter((r) => canManageTargetRole(state.user.role, r));
+}
 async function openUserModal(u, after) {
   const isEdit = !!u;
   // Load reference data for the dropdowns (brands + outlets for PIC coverage).
@@ -1817,31 +1938,38 @@ async function openUserModal(u, after) {
   try { [brands, outlets] = await Promise.all([api.brands(), api.allOutlets().catch(() => api.outlets())]); }
   catch (_) {}
   const brandOptions = [{ value: '', label: '— None —' }, ...brands.map((b) => ({ value: b.code, label: `${b.code} — ${b.name}` }))];
-  const regionOptions = [{ value: '', label: '— None —' }, ...REGIONS.map((r) => ({ value: r, label: r }))];
   const outletOptions = outlets.map((o) => ({ value: o.code, label: `${o.code}${o.region ? ' · ' + o.region : ''} (${o.brand_code})` }));
 
-  const v = await formModal(isEdit ? 'Edit user' : 'Add user', [
+  const isAdminOrSuper = ['SuperAdmin', 'AdminIT', 'AdminME'].includes(state.user ? state.user.role : '');
+
+  const fields = [
     { name: 'username', label: 'Full name', required: !isEdit, value: u ? u.username : '' },
     { name: 'email', label: 'Email', type: 'email', required: !isEdit, value: u ? u.email : '' },
-    { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: ALL_ROLES.map((r) => ({ value: r, label: r })) },
+    { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: assignableRoles().map((r) => ({ value: r, label: r })) },
     { name: 'brand', label: 'Brand', type: 'select', value: u ? (u.brand || '') : '', options: brandOptions, hint: 'Single brand access (leave None for requestors or all-brand staff).' },
     { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
-    { name: 'region', label: 'Region', type: 'select', value: u ? (u.region || '') : '', options: regionOptions },
     { name: 'pic_area', label: 'PIC area (technician label, optional)', value: u ? (u.pic_area || '') : '', placeholder: 'e.g. IT Area 1' },
-    { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
-    { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
+    ...(isAdminOrSuper ? [
+      { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
+      { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
+    ] : []),
     { name: 'can_close_override', label: '', type: 'checkbox', checkboxLabel: 'Technician may close tickets', value: u ? !!u.can_close_override : false },
     { name: 'is_active', label: '', type: 'checkbox', checkboxLabel: 'Active', value: u ? !!u.is_active : true },
     { name: 'password', label: isEdit ? 'New password (blank = keep)' : 'Password', type: 'password', required: !isEdit, hint: 'Min 10 chars, upper/lower/number/special' },
-  ], isEdit ? 'Save' : 'Create');
+  ];
+
+  const v = await formModal(isEdit ? 'Edit user' : 'Add user', fields, isEdit ? 'Save' : 'Create');
   if (!v) return;
   const payload = {
     username: v.username, email: v.email, role: v.role,
     brand: v.brand || null, all_brands: v.all_brands,
-    region: v.region || null, pic_area: v.pic_area || null,
-    outlet_access: v.outlet_access, all_outlets: v.all_outlets,
+    pic_area: v.pic_area || null,
     can_close_override: v.can_close_override, is_active: v.is_active,
   };
+  if (isAdminOrSuper) {
+    payload.outlet_access = v.outlet_access || [];
+    payload.all_outlets = !!v.all_outlets;
+  }
   if (v.password) payload.password = v.password;
   try {
     if (isEdit) await api.patchUser(u.id, payload); else await api.createUser(payload);
@@ -2229,6 +2357,106 @@ async function confirmDeleteOutlet(o, after) {
 }
 
 // ==========================================================================
+// View: Import / Export (CSV) — SuperAdmin (import) + admins (export)
+// ==========================================================================
+const IE_MODULES = [
+  { key: 'users', label: 'Users', file: 'users.csv', cols: 'username, email, role, department, phone, is_active', upsert: 'Updates existing users matched by email. New emails are reported as errors — create new users on the Users page.' },
+  { key: 'locations', label: 'Locations', file: 'locations.csv', cols: 'code, name, brand_code, region, active', upsert: 'Adds new outlets and updates existing ones, matched by code.' },
+  { key: 'schedules', label: 'Schedules', file: 'schedules.csv', cols: 'technician_email, day_of_week, start_time, end_time, active', upsert: 'Matched by technician + day_of_week + start/end time. day_of_week is 0 (Sun) – 6 (Sat).' },
+];
+async function renderImportExport() {
+  const isSuper = state.user.role === 'SuperAdmin';
+  view().innerHTML = `
+    <div class="page-head"><h2>Import / Export</h2><p>${isSuper ? 'Export or bulk-import Users, Locations and Schedules as CSV.' : 'Export data as CSV. Importing is restricted to SuperAdmin.'}</p></div>
+    <div class="ie-grid">
+      ${IE_MODULES.map((m) => `
+        <div class="panel">
+          <div class="panel-head"><h3>${esc(m.label)}</h3></div>
+          <div class="card" style="border:none">
+            <p class="muted" style="font-size:.8rem;margin-bottom:4px">Columns</p>
+            <p style="font-size:.8rem;margin-bottom:8px"><code>${esc(m.cols)}</code></p>
+            <p class="hint" style="padding:0 0 12px">${esc(m.upsert)}</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn-outline" data-export="${m.key}" data-file="${m.file}">⬇ Export</button>
+              ${isSuper ? `<button class="btn-primary" data-import="${m.key}">⬆ Import</button>` : ''}
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  $$('[data-export]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await downloadExport(b.dataset.export, b.dataset.file); toast('Export downloaded', 'success'); }
+    catch (e) { toast(e.message, 'error'); }
+    finally { b.disabled = false; }
+  }));
+  $$('[data-import]').forEach((b) => b.addEventListener('click', () => openImportModal(b.dataset.import)));
+}
+// Export downloads via rawFetch (keeps cookie auth + 401 re-auth), then saves the blob.
+async function downloadExport(module, filename) {
+  const res = await rawFetch('/api/export/' + module, { method: 'GET' });
+  if (!res.ok) { let m = 'Export failed'; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(m); }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// Import: pick a CSV → dry-run validate → preview → confirm → apply.
+function openImportModal(module) {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.csv,text/csv,text/plain';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    let text;
+    try { text = await file.text(); } catch (_) { toast('Could not read file', 'error'); return; }
+    try {
+      const res = await api.importData(module, text, true); // dry run — no writes
+      showImportPreview(module, text, res);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  input.click();
+}
+function showImportPreview(module, csvText, res) {
+  const s = res.summary || { total: 0, valid: 0, invalid: 0, toInsert: 0, toUpdate: 0 };
+  const canApply = s.invalid === 0 && s.valid > 0;
+  const errRows = (res.errors || []).slice(0, 200).map((e) => `<tr><td>${esc(e.row)}</td><td class="muted">${esc(e.message)}</td></tr>`).join('');
+  const dataCols = (res.preview && res.preview[0]) ? Object.keys(res.preview[0]).filter((c) => c !== 'action') : [];
+  const prevRows = (res.preview || []).map((p) => `<tr><td><span class="badge ${p.action === 'insert' ? 'st-New' : 'st-Assigned'}">${esc(p.action)}</span></td>${dataCols.map((c) => `<td>${esc(p[c])}</td>`).join('')}</tr>`).join('');
+  openModal({
+    title: `Import ${module} — preview`,
+    size: 'lg',
+    bodyHTML: `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <span class="badge st-New">${s.total} rows</span>
+        <span class="badge st-Resolved">${s.valid} valid</span>
+        ${s.invalid ? `<span class="badge st-Cancelled">${s.invalid} invalid</span>` : ''}
+        <span class="badge st-Assigned">${s.toInsert} insert</span>
+        <span class="badge st-OnProgress">${s.toUpdate} update</span>
+      </div>
+      ${s.invalid ? `<div class="hint" style="color:var(--danger);padding:0 0 6px">Import is all-or-nothing — fix the invalid row(s) below and re-upload; nothing is written until every row is valid.</div>
+        <div class="table-wrap" style="max-height:160px;overflow:auto"><table class="data"><thead><tr><th>Row</th><th>Error</th></tr></thead><tbody>${errRows}</tbody></table></div>` : ''}
+      ${dataCols.length ? `<div style="font-size:.82rem;font-weight:600;margin:12px 0 4px">Preview (first ${(res.preview || []).length})</div>
+        <div class="table-wrap" style="max-height:240px;overflow:auto"><table class="data"><thead><tr><th>Action</th>${dataCols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${prevRows}</tbody></table></div>` : '<p class="muted">No valid rows to preview.</p>'}`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-apply ${canApply ? '' : 'disabled'}>Apply import</button>`,
+    onMount(ov, close) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      const applyBtn = $('[data-apply]', ov);
+      if (applyBtn && canApply) applyBtn.addEventListener('click', async () => {
+        applyBtn.disabled = true; applyBtn.textContent = 'Applying…';
+        try {
+          const r = await api.importData(module, csvText, false);
+          toast(`Imported ${module}: ${r.summary.applied} applied (${r.summary.toInsert} new, ${r.summary.toUpdate} updated)`, 'success');
+          close();
+          if (state.route && state.route.name === module) route();
+        } catch (e) { toast(e.message, 'error'); applyBtn.disabled = false; applyBtn.textContent = 'Apply import'; }
+      });
+    },
+  });
+}
+
+// ==========================================================================
 // Quick / detailed report modal
 // ==========================================================================
 let quickUploader = null;
@@ -2240,7 +2468,8 @@ async function openReportModal() {
   const optgroups = Object.entries(brandsGroups).map(([b, list]) => `<optgroup label="${esc(b)}">${list.map((o) => `<option value="${esc(o.code)}" ${o.code === lastOutlet ? 'selected' : ''}>${esc(o.code)}</option>`).join('')}</optgroup>`).join('');
   const isAdmin = ADMIN_ROLES.includes(state.user.role);
   const body = `
-    <div class="field"><label>Outlet <span class="req-star">*</span></label><select id="q-outlet"><option value="">Select outlet…</option>${optgroups}</select></div>
+    <div class="field"><label>Nama Requestor <span class="req-star">*</span></label><input id="q-reqname" placeholder="Name of requestor" value="${esc(state.user ? state.user.username : '')}"></div>
+    <div class="field"><label>Outlet / Location <span class="req-star">*</span></label><select id="q-outlet"><option value="">Select outlet…</option>${optgroups}</select></div>
     <div class="field"><label>Department <span class="req-star">*</span></label>
       <div class="segmented"><button type="button" class="seg-btn big" data-dept="IT">🖥️ IT</button><button type="button" class="seg-btn big" data-dept="ME">🔧 Mechanical</button></div></div>
     <div class="field"><label>Category <span class="req-star">*</span></label><select id="q-cat" disabled><option>Select department first</option></select></div>
@@ -2254,7 +2483,7 @@ async function openReportModal() {
     <div class="field"><label>What’s the issue? <span class="req-star">*</span></label><textarea id="q-desc" placeholder="e.g. POS terminal 2 not printing receipts"></textarea></div>
     <div class="field"><label>Urgency</label><div class="segmented" id="q-urg">${URGENCIES.map((u) => `<button type="button" class="seg-btn ${u === 'Medium' ? 'active' : ''}" data-urg="${u}">${u}</button>`).join('')}</div></div>
     <div class="field"><label>Contact / WhatsApp</label><input id="q-contact" placeholder="08xx…" inputmode="tel"></div>
-    ${isAdmin ? `<div class="field"><label>Report on behalf of (optional)</label><div class="field-row"><input id="q-cname" placeholder="Name"><input id="q-cemail" placeholder="Email" type="email"></div></div>` : ''}
+    ${isAdmin ? `<div class="field"><label>Report on behalf of email (optional)</label><div class="field-row"><input id="q-cemail" placeholder="Email" type="email"></div></div>` : ''}
     <button type="button" class="btn-ghost" id="q-more">▾ Add more details (optional)</button>
     <div id="q-extra" hidden>
       <div class="field"><label>Subject (optional)</label><input id="q-title" placeholder="Short subject line"></div>
@@ -2286,7 +2515,9 @@ async function openReportModal() {
       $('[data-cancel]', ov).addEventListener('click', close);
       const submit = $('#q-submit', ov);
       submit.addEventListener('click', async () => {
+        const reqName = $('#q-reqname', ov).value.trim();
         const outlet = $('#q-outlet', ov).value, cat = $('#q-cat', ov).value, desc = $('#q-desc', ov).value.trim();
+        if (!reqName) return toast('Nama Requestor is required', 'error');
         if (!outlet) return toast('Select an outlet', 'error');
         if (!dept) return toast('Choose IT or Mechanical', 'error');
         if (!cat) return toast('Select a category', 'error');
@@ -2294,6 +2525,7 @@ async function openReportModal() {
         if (quickUploader.uploading()) return toast('Wait for uploads to finish', 'error');
         submit.disabled = true; submit.textContent = 'Submitting…';
         const payload = {
+          requestor_name: reqName, customer_name: reqName,
           department: dept, outlet_code: outlet, category: cat, description: desc, urgency: urg,
           contact_number: $('#q-contact', ov).value.trim(), report_mode: $('#q-extra', ov).hidden ? 'quick' : 'detailed',
           attachmentIds: quickUploader.ids(),
@@ -2306,7 +2538,7 @@ async function openReportModal() {
           scheduled_at: $('#q-sched', ov) ? $('#q-sched', ov).value : '',
           scheduled_end: $('#q-sched-end', ov) ? $('#q-sched-end', ov).value : '',
         };
-        if (isAdmin) { payload.customer_name = $('#q-cname', ov).value.trim(); payload.customer_email = $('#q-cemail', ov).value.trim(); }
+        if (isAdmin && $('#q-cemail', ov)) { payload.customer_email = $('#q-cemail', ov).value.trim(); }
         try {
           const t = await api.createTicket(payload);
           localStorage.setItem('lastOutlet', outlet);
@@ -2339,6 +2571,61 @@ async function doLogout() {
   navigate('/login');
   toast('Signed out', 'info');
 }
+function openChangePasswordModal() {
+  const { overlay, close } = openModal({
+    title: 'Change Password',
+    bodyHTML: `
+      <form id="form-change-pw">
+        <p class="muted mb" style="font-size:.85rem">Update your account password securely.</p>
+        <div class="field">
+          <label>Current Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-old" required placeholder="Enter current password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+        </div>
+        <div class="field mt">
+          <label>New Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-new" required placeholder="Enter new password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+          <span class="hint">Min 10 characters, including uppercase, lowercase, numbers, and special characters.</span>
+        </div>
+        <div class="field mt">
+          <label>Confirm New Password <span class="req-star">*</span></label>
+          <div class="input-pw" style="position:relative">
+            <input type="password" id="pw-confirm" required placeholder="Re-enter new password" style="width:100%;padding-right:36px">
+            <button type="button" class="pw-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;opacity:.6">${svg(EYE_ICON, 18)}</button>
+          </div>
+        </div>
+      </form>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" id="btn-save-pw">Update Password</button>`,
+    size: 'md',
+    onMount(ov, close) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      $('#btn-save-pw', ov).addEventListener('click', async () => {
+        const oldPassword = $('#pw-old', ov).value;
+        const newPassword = $('#pw-new', ov).value;
+        const confirmPassword = $('#pw-confirm', ov).value;
+        if (!oldPassword || !newPassword || !confirmPassword) return toast('All password fields are required', 'error');
+        if (newPassword !== confirmPassword) return toast('New password and confirmation do not match', 'error');
+
+        const btn = $('#btn-save-pw', ov);
+        btn.disabled = true; btn.textContent = 'Updating…';
+        try {
+          await api.changePassword({ oldPassword, newPassword, confirmPassword });
+          toast('Password changed successfully!', 'success');
+          close();
+        } catch (e) {
+          toast(e.message || 'Failed to change password', 'error');
+          btn.disabled = false; btn.textContent = 'Update Password';
+        }
+      });
+    }
+  });
+}
+
 function initTheme() {
   const saved = localStorage.getItem('theme');
   // Explicit saved choice wins; otherwise follow the OS preference.
@@ -2358,6 +2645,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#drawer-close').addEventListener('click', closeDrawer);
   $('#drawer-overlay').addEventListener('click', closeDrawer);
   $('#btn-logout').addEventListener('click', doLogout);
+  const btnCp = $('#btn-change-password');
+  if (btnCp) btnCp.addEventListener('click', openChangePasswordModal);
   $('#btn-report-quick').addEventListener('click', () => openReportModal());
   $('#btn-theme').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('theme', document.body.classList.contains('light') ? 'light' : 'dark'); updateThemeIcons(); });
   // Delegate auth-screen nav links

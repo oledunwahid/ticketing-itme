@@ -54,6 +54,7 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
       region,
       category,
       search,
+      assigned,
       scope: techFilter,
       sort,
     } = req.query;
@@ -74,6 +75,10 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
     if (outlet) add(" AND outlet_code = ?", outlet);
     if (region) add(" AND region = ?", region);
     if (category) add(" AND category = ?", category);
+    // Unassigned filter (dashboard "Unassigned" card drill-down). Matches the
+    // dashboard count: no primary technician and not Closed/Cancelled.
+    if (assigned === "no" || assigned === "unassigned")
+      add(" AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')");
     if (search) {
       add(
         " AND (title LIKE ? OR description LIKE ? OR ticket_number LIKE ? OR customer_name LIKE ? OR customer_email LIKE ?)",
@@ -104,6 +109,18 @@ router.get("/api/tickets/:id", requireAuth, async (req, res) => {
       return res
         .status(404)
         .json({ error: "Ticket not found or access denied" });
+    // Attach a human-friendly outlet name (name → display_label → code) so the
+    // detail header can show "[NUMBER] - [Outlet Name]" without an extra call.
+    if (ticket.outlet_code) {
+      const outlet = await db.pGet(
+        "SELECT name, display_label FROM outlets WHERE code = ?",
+        [ticket.outlet_code],
+      );
+      ticket.outlet_name =
+        (outlet && (outlet.name || outlet.display_label)) || ticket.outlet_code;
+    } else {
+      ticket.outlet_name = null;
+    }
     const comments = await db.pAll(
       "SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC",
       [ticket.id],
@@ -117,11 +134,16 @@ router.get("/api/tickets/:id", requireAuth, async (req, res) => {
       [ticket.id],
     );
     const assignments = await db.pAll(
-      `SELECT a.*, u.username AS technician_name FROM ticket_assignments a
+      `SELECT a.*, u.username AS technician_name, u.email AS technician_email, u.phone AS technician_phone, u.role AS technician_role
+       FROM ticket_assignments a
        LEFT JOIN users u ON u.id = a.technician_id WHERE a.ticket_id = ? ORDER BY a.assigned_at DESC`,
       [ticket.id],
     );
-    res.json({ ticket, comments, activity, attachments, assignments });
+    const activeAssignments = assignments.filter((a) => a.active === 1 || a.is_active === 1);
+    const primaryTechnician = activeAssignments.find((a) => (a.role_type || 'primary') === 'primary') || null;
+    const collaborators = activeAssignments.filter((a) => a.role_type === 'collaborator');
+
+    res.json({ ticket, comments, activity, attachments, assignments, activeAssignments, primaryTechnician, collaborators });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch ticket" });
@@ -577,6 +599,7 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
 });
 
 // --- Assign / reassign -----------------------------------------------------
+// --- Assign / reassign / multi-technician assignment ------------------------
 router.post(
   "/api/tickets/:id/assign",
   requireAuth,
@@ -591,9 +614,13 @@ router.post(
       if (!adminScopeForTicket(req.user, ticket))
         return res.status(403).json({ error: "Wrong department" });
 
-      const { technician_id, reason, override } = req.body || {};
+      const { technician_id, action, role_type, reason, override } = req.body || {};
+      if (!technician_id) {
+        return res.status(400).json({ error: "technician_id is required" });
+      }
+
       const tech = await db.pGet(
-        "SELECT id, username, department, role, is_active FROM users WHERE id = ?",
+        "SELECT id, username, email, phone, department, role, is_active FROM users WHERE id = ?",
         [technician_id],
       );
       if (!tech || !isTechnician({ role: tech.role }))
@@ -603,61 +630,119 @@ router.post(
 
       const techDept = deptForRole(tech.role);
       if (techDept !== ticket.department && !override) {
-        return res
-          .status(400)
-          .json({
-            error: `Technician is ${techDept}, ticket is ${ticket.department}. Use override to force.`,
-          });
+        return res.status(400).json({
+          error: `Technician is ${techDept}, ticket is ${ticket.department}. Use override to force.`,
+        });
       }
 
-      // Close previous active assignment, open a new one.
-      await db.pRun(
-        "UPDATE ticket_assignments SET active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND active = 1",
-        [ticket.id],
-      );
-      await db.pRun(
-        "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason) VALUES (?, ?, ?, ?)",
-        [ticket.id, tech.id, req.user.id, reason || null],
+      const currentPrimary = await db.pGet(
+        "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
+        [ticket.id]
       );
 
-      const newStatus = ["New", "Open"].includes(ticket.status)
-        ? "Assigned"
-        : ticket.status;
-      await db.pRun(
-        `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, status = ?,
-         assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
-         first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-        [tech.id, tech.username, newStatus, ticket.id],
-      );
-      await logActivity(
-        ticket.id,
-        req.user,
-        "ticket.assigned",
-        `Assigned to ${tech.username}${override && techDept !== ticket.department ? " (override)" : ""}${reason ? " — " + reason : ""}`,
-      );
-      notify("ticket.assigned", {
-        ticketId: ticket.id,
-        recipients: [
-          { name: tech.username, email: tech.email, phone: tech.phone },
-        ],
-        message: `You were assigned ${ticket.ticket_number}`,
-        channels: ["in_app"],
-      });
+      let targetRole = role_type || (action === "add_collaborator" ? "collaborator" : action === "set_primary" ? "primary" : null);
+      if (!targetRole) {
+        targetRole = !currentPrimary ? "primary" : "collaborator";
+      }
 
-      res.json(
-        await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]),
-      );
+      if (action === "remove") {
+        await db.pRun(
+          "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND technician_id = ? AND active = 1",
+          [ticket.id, tech.id]
+        );
+
+        if (currentPrimary && currentPrimary.technician_id === tech.id) {
+          const nextCollaborator = await db.pGet(
+            `SELECT a.*, u.username FROM ticket_assignments a
+             JOIN users u ON u.id = a.technician_id
+             WHERE a.ticket_id = ? AND a.active = 1 AND a.technician_id != ?
+             ORDER BY a.assigned_at ASC LIMIT 1`,
+            [ticket.id, tech.id]
+          );
+          if (nextCollaborator) {
+            await db.pRun(
+              "UPDATE ticket_assignments SET role_type = 'primary' WHERE id = ?",
+              [nextCollaborator.id]
+            );
+            await db.pRun(
+              "UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+              [nextCollaborator.technician_id, nextCollaborator.username, ticket.id]
+            );
+          } else {
+            await db.pRun(
+              "UPDATE tickets SET assigned_technician_id = NULL, assignee_name = 'Unassigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+              [ticket.id]
+            );
+          }
+        }
+        await logActivity(ticket.id, req.user, "ticket.assignment_removed", `Removed technician ${tech.username}`);
+      } else {
+        if (targetRole === "primary") {
+          await db.pRun(
+            "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
+            [ticket.id]
+          );
+          await db.pRun(
+            "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND technician_id = ? AND active = 1",
+            [ticket.id, tech.id]
+          );
+          await db.pRun(
+            "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, 'primary', 1, 1)",
+            [ticket.id, tech.id, req.user.id, reason || null]
+          );
+
+          // Assignment must NOT change the ticket's status — leaving New/Open
+          // untouched fixes the bug where assigning a technician silently reset
+          // the status to "Assigned". Status only changes via explicit updates.
+          await db.pRun(
+            `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
+             assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
+             first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [tech.id, tech.username, ticket.id]
+          );
+          await logActivity(
+            ticket.id,
+            req.user,
+            "ticket.assigned",
+            `Assigned Primary Technician: ${tech.username}${reason ? " — " + reason : ""}`
+          );
+        } else {
+          const existingCollab = await db.pGet(
+            "SELECT 1 FROM ticket_assignments WHERE ticket_id = ? AND technician_id = ? AND active = 1",
+            [ticket.id, tech.id]
+          );
+          if (!existingCollab) {
+            await db.pRun(
+              "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, 'collaborator', 1, 1)",
+              [ticket.id, tech.id, req.user.id, reason || null]
+            );
+            await logActivity(
+              ticket.id,
+              req.user,
+              "ticket.collaborator_added",
+              `Added Collaborator: ${tech.username}${reason ? " — " + reason : ""}`
+            );
+          }
+        }
+
+        notify("ticket.assigned", {
+          ticketId: ticket.id,
+          recipients: [{ name: tech.username, email: tech.email, phone: tech.phone }],
+          message: `You were assigned as ${targetRole} for ticket ${ticket.ticket_number}`,
+          channels: ["in_app"],
+        });
+      }
+
+      res.json(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]));
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: "Failed to assign technician" });
+      res.status(500).json({ error: "Failed to update technician assignment" });
     }
-  },
+  }
 );
 
 // --- Self-assignment (technicians) -----------------------------------------
-// A technician takes ownership of a ticket in their department + allowed scope.
-// Enforced entirely server-side (frontend button visibility is a convenience).
 router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
   try {
     if (!isTechnician(req.user))
@@ -665,7 +750,6 @@ router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
         .status(403)
         .json({ error: "Only technicians can self-assign tickets" });
 
-    // Visible against the technician's BROADEST allowed scope (dept + PIC/all).
     const ticket = await getVisibleTicket(req.user, req.params.id, {
       techFilter: "all",
     });
@@ -685,37 +769,50 @@ router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
         .status(400)
         .json({ error: "This ticket is already closed or cancelled" });
 
-    if (ticket.assigned_technician_id === req.user.id)
-      return res
-        .status(400)
-        .json({ error: "This ticket is already assigned to you" });
+    const selfAssignment = await db.pGet(
+      "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND technician_id = ? AND active = 1",
+      [ticket.id, req.user.id]
+    );
+    if (selfAssignment) {
+      return res.status(400).json({
+        error: `You are already assigned as ${selfAssignment.role_type || 'primary'} to this ticket.`
+      });
+    }
 
-    // Close any previous active assignment, open a new one for me.
-    await db.pRun(
-      "UPDATE ticket_assignments SET active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND active = 1",
-      [ticket.id],
-    );
-    await db.pRun(
-      "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason) VALUES (?, ?, ?, ?)",
-      [ticket.id, req.user.id, req.user.id, "self-assignment"],
+    const currentPrimary = await db.pGet(
+      "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
+      [ticket.id]
     );
 
-    const newStatus = ["New", "Open"].includes(ticket.status)
-      ? "Assigned"
-      : ticket.status;
+    const roleType = !currentPrimary ? "primary" : "collaborator";
+
     await db.pRun(
-      `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, status = ?,
-         assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
-         first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP),
-         updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [req.user.id, req.user.username, newStatus, ticket.id],
+      "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, ?, 1, 1)",
+      [ticket.id, req.user.id, req.user.id, "self-assignment", roleType]
     );
+
+    if (roleType === "primary") {
+      // Self-assignment records the technician but leaves the status untouched.
+      await db.pRun(
+        `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
+           assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
+           first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP),
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [req.user.id, req.user.username, ticket.id]
+      );
+    } else {
+      await db.pRun(
+        "UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [ticket.id]
+      );
+    }
+
     await logActivity(
       ticket.id,
       req.user,
       "ticket.assigned",
-      `Assigned to ${req.user.username} by self-assignment`,
+      `Self-assigned as ${roleType} technician (${req.user.username})`
     );
 
     res.json(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]));
@@ -768,13 +865,11 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
     const urgency = URGENCIES.includes(b.urgency) ? b.urgency : "Medium";
     const reportMode = b.report_mode === "detailed" ? "detailed" : "quick";
 
-    // Requestor identity is always taken from the authenticated user.
+    // Requestor identity: explicit requestor name from form if provided, defaulting to logged in user.
     const requestorName =
-      isAdmin(req.user) && b.customer_name
-        ? b.customer_name
-        : req.user.username;
+      b.requestor_name || b.customer_name || req.user.username;
     const requestorEmail =
-      isAdmin(req.user) && b.customer_email ? b.customer_email : req.user.email;
+      b.customer_email || req.user.email;
 
     // Double-click guard: same user + outlet + category + text within 8s → reject softly.
     const fp = crypto

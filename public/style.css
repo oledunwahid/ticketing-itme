@@ -186,6 +186,12 @@ textarea { resize: vertical; min-height: 90px; }
 .stat.accent-warn .n { color: var(--warn); }
 .stat.accent-ok .n { color: var(--ok); }
 .stat.accent-primary .n { color: var(--primary); }
+.stat-click { cursor: pointer; transition: border-color .15s, transform .05s, box-shadow .15s; }
+.stat-click:hover { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.stat-click:active { transform: translateY(1px); }
+.stat-click:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.ie-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.ie-grid code { font-size: 0.76rem; word-break: break-word; }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .dist-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 4px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
@@ -258,6 +264,11 @@ textarea { resize: vertical; min-height: 90px; }
 .detail-top .tnum { font-size: 0.8rem; font-weight: 700; color: var(--primary); }
 .detail-top h2 { font-size: 1.3rem; font-weight: 700; word-break: break-word; }
 .detail-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.detail-headline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82rem; color: var(--text-muted); margin: 4px 0; }
+/* Technician assignment role badges — Primary (PIC) must be visually distinct
+   from Collaborators. PIC = solid indigo, Collaborator = muted outline. */
+.badge-primary, .badge-pic { background: var(--primary); color: #fff; }
+.badge-collab { background: rgba(148,163,184,.18); color: #94a3b8; border: 1px solid var(--border); }
 .detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
 .info-list { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 0.86rem; }
 .info-list dt { color: var(--text-muted); }
@@ -288,6 +299,16 @@ textarea { resize: vertical; min-height: 90px; }
 .phase-tag { font-size: 0.62rem; font-weight: 800; text-transform: uppercase; padding: 1px 5px; border-radius: 4px; }
 .phase-before { background: rgba(239,68,68,.18); color: #f87171; }
 .phase-after { background: rgba(16,185,129,.18); color: #34d399; }
+.att-img { cursor: zoom-in; }
+
+/* Image lightbox preview */
+.lightbox-overlay { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,.82); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.lightbox { display: flex; flex-direction: column; gap: 10px; max-width: 100%; max-height: 100%; }
+.lightbox-bar { display: flex; align-items: center; gap: 10px; color: #fff; }
+.lightbox-name { flex: 1; min-width: 0; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightbox-btn { background: rgba(255,255,255,.14); color: #fff; border: none; border-radius: 6px; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; font-size: 1.15rem; line-height: 1; cursor: pointer; text-decoration: none; }
+.lightbox-btn:hover { background: rgba(255,255,255,.28); }
+.lightbox-img { max-width: 92vw; max-height: 82vh; border-radius: 8px; object-fit: contain; background: rgba(255,255,255,.04); }
 
 /* --- Upload zone --- */
 .upload-zone { border: 2px dashed var(--border); border-radius: var(--radius-sm); padding: 18px; text-align: center; color: var(--text-muted); position: relative; cursor: pointer; transition: border .15s, background .15s; }

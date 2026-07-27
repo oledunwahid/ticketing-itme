@@ -185,4 +185,49 @@ router.get("/api/auth/me", requireAuth, (req, res) => {
   });
 });
 
+router.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  try {
+    const { oldPassword, newPassword, confirmPassword } = req.body || {};
+    const oldPw = oldPassword || req.body.old_password;
+    const newPw = newPassword || req.body.new_password;
+    const confirmPw = confirmPassword || req.body.confirm_password;
+
+    if (!oldPw || !newPw || !confirmPw) {
+      return res
+        .status(400)
+        .json({ error: "Current password, new password, and confirmation are required." });
+    }
+    if (newPw !== confirmPw) {
+      return res.status(400).json({ error: "New password and confirmation do not match." });
+    }
+
+    const passwordRegex =
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
+    if (!passwordRegex.test(newPw)) {
+      return res.status(400).json({
+        error:
+          "New password must be at least 10 characters long, with uppercase, lowercase, numbers, and special characters.",
+      });
+    }
+
+    const user = await db.pGet("SELECT id, password_hash FROM users WHERE id = ?", [
+      req.user.id,
+    ]);
+    if (!user || !bcrypt.compareSync(oldPw, user.password_hash)) {
+      return res.status(400).json({ error: "Incorrect current password." });
+    }
+
+    const newHash = bcrypt.hashSync(newPw, 10);
+    await db.pRun("UPDATE users SET password_hash = ? WHERE id = ?", [
+      newHash,
+      req.user.id,
+    ]);
+
+    res.json({ success: true, message: "Password updated successfully." });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to update password." });
+  }
+});
+
 module.exports = router;

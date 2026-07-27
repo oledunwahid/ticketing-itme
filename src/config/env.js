@@ -35,6 +35,10 @@ try {
 
 const NODE_ENV = process.env.NODE_ENV;
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || "0.0.0.0";
+const DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.resolve(PROJECT_ROOT, "tickets.db");
 const JWT_SECRET = process.env.JWT_SECRET || "union-dev-secret-change-me";
 
 // Same guard as before: refuse to boot in production without a real secret.
@@ -47,5 +51,8 @@ module.exports = {
   PROJECT_ROOT,
   NODE_ENV,
   PORT,
+  HOST,
+  DB_PATH,
   JWT_SECRET,
 };
+

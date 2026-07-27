@@ -1,31 +1,41 @@
 /* ==========================================================================
    Routes — User management (/api/users*)
-   Verbatim move from app.js. URLs, middleware, RBAC, validation and response
-   shapes unchanged. Mounted at "/" so full paths are preserved.
-     GET    /api/users        (list; requireRole ADMIN_ROLES)
-     POST   /api/users        (create; SuperAdmin)
-     PATCH  /api/users/:id    (update; SuperAdmin; self-demote guard)
-     DELETE /api/users/:id    (delete; SuperAdmin; self-delete guard)
+   Mounted at "/" so full paths are preserved. Access is limited to the user
+   module roles (SuperAdmin + AdminIT); AdminIT is scoped to IT-side target
+   roles via canManageTargetRole (see src/utils/permissions.js).
+     GET    /api/users        (list; SuperAdmin/AdminIT; rows scoped to caller)
+     POST   /api/users        (create; SuperAdmin/AdminIT; target-role scoped)
+     PATCH  /api/users/:id    (update; SuperAdmin/AdminIT; target+role scoped; self-demote guard)
+     DELETE /api/users/:id    (delete; SuperAdmin/AdminIT; target scoped; self-delete guard)
    ========================================================================== */
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const db = require("../../database");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { deptForRole } = require("../utils/permissions");
-const { ADMIN_ROLES } = require("../config/constants");
+const {
+  deptForRole,
+  canManageTargetRole,
+} = require("../utils/permissions");
 
 const router = express.Router();
+
+// Roles allowed into the Users module. SuperAdmin manages all users; AdminIT/AdminME
+// manage their scoped department target roles via canManageTargetRole.
+const USER_MODULE_ROLES = ["SuperAdmin", "AdminIT", "AdminME"];
 
 router.get(
   "/api/users",
   requireAuth,
-  requireRole(ADMIN_ROLES),
+  requireRole(USER_MODULE_ROLES),
   async (req, res) => {
-    const rows = await db.pAll(
+    let rows = await db.pAll(
       `SELECT id, username, email, role, department, brand, all_brands, all_outlets, region,
             pic_area, phone, is_active, can_close_override, default_outlet_code, created_at
        FROM users ORDER BY id ASC`,
     );
+    // Scope the list to what the caller may manage. SuperAdmin sees everyone;
+    // AdminIT only sees IT-side roles (never SuperAdmin/AdminME/TechnicianME).
+    rows = rows.filter((u) => canManageTargetRole(req.user.role, u.role));
     // Attach PIC outlet coverage (used by the user modal / technician scope).
     for (const u of rows) {
       u.outlet_access = (
@@ -42,7 +52,7 @@ router.get(
 router.post(
   "/api/users",
   requireAuth,
-  requireRole("SuperAdmin"),
+  requireRole(USER_MODULE_ROLES),
   async (req, res) => {
     try {
       const {
@@ -69,6 +79,12 @@ router.post(
           .json({ error: "username, email, password, role are required" });
       if (!db.APP_ROLES.includes(role))
         return res.status(400).json({ error: "Invalid role" });
+      // Scope guard: AdminIT may only create IT-side roles. Blocks payload
+      // tampering (e.g. AdminIT trying to mint a SuperAdmin/AdminME account).
+      if (!canManageTargetRole(req.user.role, role))
+        return res
+          .status(403)
+          .json({ error: "Forbidden. You cannot create a user with this role." });
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email))
         return res.status(400).json({ error: "Invalid email" });
@@ -131,13 +147,24 @@ router.post(
 router.patch(
   "/api/users/:id",
   requireAuth,
-  requireRole("SuperAdmin"),
+  requireRole(USER_MODULE_ROLES),
   async (req, res) => {
     try {
       const userId = parseInt(req.params.id, 10);
       if (isNaN(userId))
         return res.status(400).json({ error: "Invalid user ID" });
       const b = req.body || {};
+      // Scope guard: the caller must be allowed to manage the target's CURRENT
+      // role before any edit. Stops AdminIT touching SuperAdmin/AdminME/etc via
+      // a direct API call, even though those users are hidden from their list.
+      const target = await db.pGet("SELECT id, role FROM users WHERE id = ?", [
+        userId,
+      ]);
+      if (!target) return res.status(404).json({ error: "User not found" });
+      if (!canManageTargetRole(req.user.role, target.role))
+        return res
+          .status(403)
+          .json({ error: "Forbidden. You cannot manage this user." });
       const updates = [];
       const params = [];
       const set = (c, v) => {
@@ -154,6 +181,12 @@ router.patch(
       if (b.role) {
         if (!db.APP_ROLES.includes(b.role))
           return res.status(400).json({ error: "Invalid role" });
+        // Scope guard: the NEW role must also be manageable. Blocks AdminIT
+        // from escalating anyone (incl. themselves) to SuperAdmin/AdminME/etc.
+        if (!canManageTargetRole(req.user.role, b.role))
+          return res
+            .status(403)
+            .json({ error: "Forbidden. You cannot assign this role." });
         if (userId === req.user.id && b.role !== "SuperAdmin")
           return res
             .status(400)
@@ -227,7 +260,7 @@ router.patch(
 router.delete(
   "/api/users/:id",
   requireAuth,
-  requireRole("SuperAdmin"),
+  requireRole(USER_MODULE_ROLES),
   async (req, res) => {
     const userId = parseInt(req.params.id, 10);
     if (isNaN(userId))
@@ -236,6 +269,15 @@ router.delete(
       return res
         .status(400)
         .json({ error: "You cannot delete your own account." });
+    // Scope guard: AdminIT can only delete IT-side users; never SuperAdmin/ME.
+    const target = await db.pGet("SELECT id, role FROM users WHERE id = ?", [
+      userId,
+    ]);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (!canManageTargetRole(req.user.role, target.role))
+      return res
+        .status(403)
+        .json({ error: "Forbidden. You cannot delete this user." });
     const r = await db.pRun("DELETE FROM users WHERE id = ?", [userId]);
     if (r.changes === 0)
       return res.status(404).json({ error: "User not found" });

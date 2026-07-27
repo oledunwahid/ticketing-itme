@@ -3,14 +3,15 @@
    Verbatim move from app.js. URLs, middleware, validation and response
    shapes unchanged. Mounted at "/" so full paths are preserved.
      GET    /api/meta/outlets   (any authenticated user)
-     GET    /api/outlets        (SuperAdmin/AdminIT/AdminME/TechnicianIT/TechnicianME)
+     GET    /api/outlets        (SuperAdmin/AdminIT/AdminME)
      POST   /api/outlets
      PATCH  /api/outlets/:id
      DELETE /api/outlets/:id
-   ========================================================================== */
+    ========================================================================== */
 const express = require("express");
 const db = require("../../database");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { ADMIN_ROLES } = require("../config/constants");
 
 const router = express.Router();
 
@@ -23,12 +24,12 @@ router.get("/api/meta/outlets", requireAuth, async (req, res) => {
 
 // ==========================================================================
 // Location (Outlets) Management API Endpoints (RBAC Enforced)
-// Allowed roles: SuperAdmin, AdminIT, AdminME, TechnicianIT, TechnicianME
+// Allowed roles: SuperAdmin, AdminIT, AdminME
 // ==========================================================================
 router.get(
   "/api/outlets",
   requireAuth,
-  requireRole("SuperAdmin", "AdminIT", "AdminME", "TechnicianIT", "TechnicianME"),
+  requireRole(...ADMIN_ROLES),
   async (req, res) => {
     try {
       const sql = "SELECT * FROM outlets ORDER BY brand_code, code";
@@ -44,7 +45,7 @@ router.get(
 router.post(
   "/api/outlets",
   requireAuth,
-  requireRole("SuperAdmin", "AdminIT", "AdminME", "TechnicianIT", "TechnicianME"),
+  requireRole(...ADMIN_ROLES),
   async (req, res) => {
     try {
       const brandCode = String(req.body.brand_code || "").trim().toUpperCase();
@@ -83,7 +84,7 @@ router.post(
 router.patch(
   "/api/outlets/:id",
   requireAuth,
-  requireRole("SuperAdmin", "AdminIT", "AdminME", "TechnicianIT", "TechnicianME"),
+  requireRole(...ADMIN_ROLES),
   async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
@@ -152,7 +153,7 @@ router.patch(
 router.delete(
   "/api/outlets/:id",
   requireAuth,
-  requireRole("SuperAdmin", "AdminIT", "AdminME", "TechnicianIT", "TechnicianME"),
+  requireRole(...ADMIN_ROLES),
   async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);

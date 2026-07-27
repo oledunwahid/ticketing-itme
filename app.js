@@ -16,7 +16,7 @@ const morgan = require("morgan");
 const path = require("path");
 const cookieParser = require("cookie-parser");
 const db = require("./database");
-const { PORT } = require("./src/config/env");
+const { PORT, HOST } = require("./src/config/env");
 
 const app = express();
 
@@ -38,6 +38,7 @@ app.use(require("./src/routes/technicians.routes"));
 app.use(require("./src/routes/reports.routes"));
 app.use(require("./src/routes/users.routes"));
 app.use(require("./src/routes/attachments.routes"));
+app.use(require("./src/routes/importexport.routes")); // CSV import/export (admin)
 app.use(require("./src/routes/public.routes")); // unauthenticated quick-report
 
 // --- Static + SPA ----------------------------------------------------------
@@ -56,8 +57,8 @@ app.use((err, req, res, next) => {
 
 // --- Start (after DB is ready) ---------------------------------------------
 db.ready.then(() => {
-  app.listen(PORT, () => {
-    console.log(`IT-ME Ticketing server running at http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`IT-ME Ticketing server running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   });
 });
 

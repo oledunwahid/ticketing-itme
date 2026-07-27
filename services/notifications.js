@@ -5,15 +5,16 @@
    via env — safe for prototype/demo. Everything is recorded in
    notification_logs for audit + future replay.
    ========================================================================== */
+require('../src/config/env');
 const db = require('../database');
 const { sendWhatsApp } = require('./fonnte');
 
 const CONFIG = {
-  emailEnabled: process.env.EMAIL_ENABLED === 'true',
-  whatsappEnabled: process.env.FONNTE_ENABLED === 'true',
-  fonnteToken: process.env.FONNTE_TOKEN || '',
-  fonnteDevice: process.env.FONNTE_DEVICE || '',
-  fonnteEndpoint: process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send',
+  get emailEnabled() { return process.env.EMAIL_ENABLED === 'true'; },
+  get whatsappEnabled() { return process.env.FONNTE_ENABLED === 'true'; },
+  get fonnteToken() { return process.env.FONNTE_TOKEN || ''; },
+  get fonnteDevice() { return process.env.FONNTE_DEVICE || ''; },
+  get fonnteEndpoint() { return process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send'; },
 };
 
 async function log(ticketId, channel, recipient, template, payload, status) {

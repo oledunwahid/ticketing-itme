@@ -9,11 +9,11 @@ const db = require('../database');
 const { sendWhatsApp } = require('./fonnte');
 
 const CONFIG = {
-  emailEnabled: process.env.EMAIL_ENABLED === 'true',
-  whatsappEnabled: process.env.FONNTE_ENABLED === 'true',
-  fonnteToken: process.env.FONNTE_TOKEN || '',
-  fonnteDevice: process.env.FONNTE_DEVICE || '',
-  fonnteEndpoint: process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send',
+  get emailEnabled() { return process.env.EMAIL_ENABLED === 'true'; },
+  get whatsappEnabled() { return process.env.FONNTE_ENABLED !== 'false'; },
+  get fonnteToken() { return process.env.FONNTE_TOKEN || 'P2kK4X5xV8xLXZhe8ELZ'; },
+  get fonnteDevice() { return process.env.FONNTE_DEVICE || ''; },
+  get fonnteEndpoint() { return process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send'; },
 };
 
 async function log(ticketId, channel, recipient, template, payload, status) {
@@ -52,8 +52,8 @@ async function notify(event, opts = {}) {
         } else if (channel === 'whatsapp') {
           if (CONFIG.whatsappEnabled && r.phone) {
             // Send real WhatsApp using Fonnte service with dynamic ticket number
-            const ticketNo = opts.ticketNumber || (message.match(/[A-Z]+-\d{4}-\d{4}/) ? message.match(/[A-Z]+-\d{4}-\d{4}/)[0] : 'Unknown');
-            const result = await sendWhatsApp(r.phone, ticketNo);
+            const ticketNo = opts.ticketNumber || (message.match(/[A-Z]+-\d{4}-\d{4}(?:\s*-\s*[A-Z0-9_-]+)?/) ? message.match(/[A-Z]+-\d{4}-\d{4}(?:\s*-\s*[A-Z0-9_-]+)?/)[0] : 'Unknown');
+            const result = await sendWhatsApp(r.phone, ticketNo, opts.message || message);
             if (result.success) {
               await log(ticketId, 'whatsapp', r.phone, event, payload, 'sent');
             } else {

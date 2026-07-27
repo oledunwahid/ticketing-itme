@@ -19,8 +19,8 @@ const NAV = {
   SuperAdmin: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
   AdminIT: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
   AdminME: ['dashboard', 'tickets', 'schedules', 'reports', 'categories', 'locations', 'importexport'],
-  TechnicianIT: ['tickets', 'categories', 'locations'],
-  TechnicianME: ['tickets', 'categories', 'locations'],
+  TechnicianIT: ['tickets', 'categories'],
+  TechnicianME: ['tickets', 'categories'],
   Requestor: ['tickets'],
   Leader: ['dashboard', 'tickets', 'reports'],
 };
@@ -706,7 +706,7 @@ function renderAccessDenied() {
         <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
       </svg>
       <h3 style="color:var(--danger);font-size:1.35rem;margin-bottom:8px">Access Denied</h3>
-      <p class="muted" style="max-width:380px;margin:0 auto 20px">You do not have the required permissions to access the Category Creation Menu.</p>
+      <p class="muted" style="max-width:380px;margin:0 auto 20px">You do not have the required permissions to access this page.</p>
       <button class="btn-primary" id="btn-denied-home">Go to Tickets</button>
     </div>`;
   $('#btn-denied-home').addEventListener('click', () => navigate('/tickets'));

@@ -54,6 +54,7 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
       region,
       category,
       search,
+      assigned,
       scope: techFilter,
       sort,
     } = req.query;
@@ -74,6 +75,10 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
     if (outlet) add(" AND outlet_code = ?", outlet);
     if (region) add(" AND region = ?", region);
     if (category) add(" AND category = ?", category);
+    // Unassigned filter (dashboard "Unassigned" card drill-down). Matches the
+    // dashboard count: no primary technician and not Closed/Cancelled.
+    if (assigned === "no" || assigned === "unassigned")
+      add(" AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')");
     if (search) {
       add(
         " AND (title LIKE ? OR description LIKE ? OR ticket_number LIKE ? OR customer_name LIKE ? OR customer_email LIKE ?)",
@@ -104,6 +109,18 @@ router.get("/api/tickets/:id", requireAuth, async (req, res) => {
       return res
         .status(404)
         .json({ error: "Ticket not found or access denied" });
+    // Attach a human-friendly outlet name (name → display_label → code) so the
+    // detail header can show "[NUMBER] - [Outlet Name]" without an extra call.
+    if (ticket.outlet_code) {
+      const outlet = await db.pGet(
+        "SELECT name, display_label FROM outlets WHERE code = ?",
+        [ticket.outlet_code],
+      );
+      ticket.outlet_name =
+        (outlet && (outlet.name || outlet.display_label)) || ticket.outlet_code;
+    } else {
+      ticket.outlet_name = null;
+    }
     const comments = await db.pAll(
       "SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC",
       [ticket.id],
@@ -674,13 +691,15 @@ router.post(
             [ticket.id, tech.id, req.user.id, reason || null]
           );
 
-          const newStatus = ["New", "Open"].includes(ticket.status) ? "Assigned" : ticket.status;
+          // Assignment must NOT change the ticket's status — leaving New/Open
+          // untouched fixes the bug where assigning a technician silently reset
+          // the status to "Assigned". Status only changes via explicit updates.
           await db.pRun(
-            `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, status = ?,
+            `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
              assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
              first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
              WHERE id = ?`,
-            [tech.id, tech.username, newStatus, ticket.id]
+            [tech.id, tech.username, ticket.id]
           );
           await logActivity(
             ticket.id,
@@ -773,16 +792,14 @@ router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
     );
 
     if (roleType === "primary") {
-      const newStatus = ["New", "Open"].includes(ticket.status)
-        ? "Assigned"
-        : ticket.status;
+      // Self-assignment records the technician but leaves the status untouched.
       await db.pRun(
-        `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, status = ?,
+        `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
            assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
            first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP),
            updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [req.user.id, req.user.username, newStatus, ticket.id]
+        [req.user.id, req.user.username, ticket.id]
       );
     } else {
       await db.pRun(

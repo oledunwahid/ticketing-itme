@@ -26,7 +26,19 @@ function validateTransition(ticket, next, body, user) {
   if (next === "Cancelled" && !body.cancel_reason) {
     return "A cancellation reason is required";
   }
-  if (next === "On Progress" && !ticket.assigned_technician_id) {
+  // Core simplified flow: a ticket must pass through On Progress before it can
+  // be Closed — direct New→Closed / Open→Closed is not allowed. Legacy statuses
+  // (Resolved, Waiting*, etc.) keep their existing paths to Closed unchanged.
+  if (next === "Closed" && (ticket.status === "New" || ticket.status === "Open")) {
+    return "A ticket must move to On Progress before it can be Closed";
+  }
+  // Starting work needs an assigned technician, except an admin may start work
+  // immediately (New/Open → On Progress) without a technician on record.
+  if (
+    next === "On Progress" &&
+    !ticket.assigned_technician_id &&
+    !isAdmin(user)
+  ) {
     return "Assign a technician before starting work";
   }
   if (ticket.status === "Closed" && next !== "Closed") {

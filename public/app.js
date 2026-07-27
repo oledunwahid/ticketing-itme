@@ -6,6 +6,9 @@
 // ---- Domain constants (mirror backend) ----
 const STATUSES = ['New', 'Open', 'Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart',
   'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'];
+// Core simplified daily-workflow statuses shown in the ticket status control.
+// Full STATUSES is kept for filters/reporting; CORE_STATUSES is the daily flow.
+const CORE_STATUSES = ['New', 'Open', 'On Progress', 'Closed'];
 const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
 const REGIONS = ['Jakarta', 'Surabaya'];
 const TECH_STATUSES = ['On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
@@ -13,9 +16,9 @@ const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
 const NAV = {
-  SuperAdmin: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
-  AdminIT: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'users', 'categories', 'locations'],
-  AdminME: ['dashboard', 'tickets', 'queue', 'schedules', 'reports', 'categories', 'locations'],
+  SuperAdmin: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
+  AdminIT: ['dashboard', 'tickets', 'schedules', 'reports', 'users', 'categories', 'locations', 'importexport'],
+  AdminME: ['dashboard', 'tickets', 'schedules', 'reports', 'categories', 'locations', 'importexport'],
   TechnicianIT: ['tickets', 'categories', 'locations'],
   TechnicianME: ['tickets', 'categories', 'locations'],
   Requestor: ['tickets'],
@@ -24,12 +27,12 @@ const NAV = {
 const NAV_META = {
   dashboard: { label: 'Dashboard', icon: 'grid' },
   tickets: { label: 'Tickets', icon: 'ticket' },
-  queue: { label: 'Queue', icon: 'inbox' },
   schedules: { label: 'Schedules', icon: 'calendar' },
   reports: { label: 'Reporting & Performance', icon: 'chart' },
   users: { label: 'Users', icon: 'users' },
   categories: { label: 'Categories', icon: 'tag' },
   locations: { label: 'Locations', icon: 'mapPin' },
+  importexport: { label: 'Import / Export', icon: 'swap' },
 };
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
@@ -40,6 +43,7 @@ const ICONS = {
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
   tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
   mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+  swap: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
 };
 
 // ---- State ----
@@ -167,6 +171,7 @@ const api = {
   report: (qs) => apiJSON('/api/reports/tickets' + (qs ? '?' + qs : '')),
   performance: (qs) => apiJSON('/api/reports/performance' + (qs ? '?' + qs : '')),
   users: () => apiJSON('/api/users'),
+  importData: (module, csv, dryRun) => apiJSON('/api/import/' + module, { method: 'POST', body: JSON.stringify({ csv, dryRun }) }),
   createUser: (b) => apiJSON('/api/users', { method: 'POST', body: JSON.stringify(b) }),
   patchUser: (id, b) => apiJSON('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(b) }),
   delUser: (id) => apiJSON('/api/users/' + id, { method: 'DELETE' }),
@@ -682,12 +687,12 @@ async function route() {
   const map = {
     dashboard: renderDashboard,
     tickets: renderTickets,
-    queue: renderQueue,
     schedules: renderSchedules,
     reports: renderReports,
     users: renderUsers,
     categories: renderCategories,
-    locations: renderLocations
+    locations: renderLocations,
+    importexport: renderImportExport
   };
   (map[name] || renderDashboard)();
 }
@@ -724,14 +729,24 @@ async function renderDashboard() {
   try {
     const d = await api.dashboard();
     const T = d.totals;
+    // Admin summary cards — counts are role-scoped by the backend (AdminIT → IT,
+    // AdminME → ME, SuperAdmin/Leader → all). Cards drill into the filtered list.
+    const deptCount = (dep) => ((d.byDept || []).find((x) => x.department === dep) || {}).c || 0;
+    const deptCards = state.user.role === 'AdminIT' ? ['IT'] : state.user.role === 'AdminME' ? ['ME'] : ['IT', 'ME'];
+    const st = (s) => '/tickets?status=' + encodeURIComponent(s);
     $('#d-stats').innerHTML = `
-      ${statCard(T.total, 'Total tickets', 'primary')}
-      ${statCard(T.open, 'Open', 'warn')}
-      ${statCard(T.unassigned, 'Unassigned', 'danger')}
-      ${statCard(T.on_scheduled || 0, 'On Scheduled')}
-      ${statCard(T.waiting, 'Waiting parts/vendor')}
-      ${statCard(d.avg_resolution_hours != null ? d.avg_resolution_hours + 'h' : '—', 'Avg resolution', 'ok')}`;
+      ${dashCard(T.new || 0, 'New', 'primary', st('New'))}
+      ${dashCard(T.open || 0, 'Open', 'warn', st('Open'))}
+      ${dashCard(T.on_progress || 0, 'On Progress', 'warn', st('On Progress'))}
+      ${dashCard(T.closed || 0, 'Closed', 'ok', st('Closed'))}
+      ${dashCard(T.unassigned || 0, 'Unassigned', 'danger', '/tickets?assigned=no')}
+      ${deptCards.map((dep) => dashCard(deptCount(dep), dep + ' tickets', 'primary', '/tickets?department=' + dep)).join('')}`;
     animateCounters($('#d-stats'));
+    $$('#d-stats [data-goto]').forEach((el) => {
+      const go = () => navigate(el.dataset.goto);
+      el.addEventListener('click', go);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    });
     const distMax = Math.max(1, ...d.byStatus.map((s) => s.c));
     // Dashboard stays glanceable: a compact SLA snapshot only. The full SLA/KPI
     // analysis, technician performance and manager insights live in the
@@ -777,6 +792,10 @@ async function renderDashboard() {
   } catch (e) { $('#d-rest').innerHTML = errBox(e); }
 }
 function statCard(n, l, accent) { return `<div class="stat ${accent ? 'accent-' + accent : ''}"><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`; }
+// Clickable dashboard summary card. `goto` is an in-app path the card links to.
+function dashCard(n, l, accent, goto) {
+  return `<div class="stat ${accent ? 'accent-' + accent : ''}${goto ? ' stat-click' : ''}"${goto ? ` data-goto="${esc(goto)}" role="button" tabindex="0"` : ''}><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`;
+}
 // Count-up animation for numeric stat values (preserves any suffix like "h")
 function animateCounters(root) {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -802,7 +821,7 @@ function skeletonStats() { return Array(5).fill('<div class="stat"><span class="
 // View: Tickets list
 // ==========================================================================
 // scope = technician PIC filter; sort = created_asc (default) | created_desc | urgency
-const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '' };
+const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' };
 const TECH_SCOPES = [
   { value: '', label: 'My PIC outlets' },
   { value: 'mine', label: 'Assigned to me' },
@@ -810,6 +829,16 @@ const TECH_SCOPES = [
   { value: 'all', label: 'All allowed tickets' },
 ];
 async function renderTickets() {
+  // Deep-link filters (e.g. from a dashboard card → /tickets?status=New). Start
+  // from a clean filter set, apply the query-string keys, then tidy the URL.
+  const sp = new URLSearchParams(location.search);
+  if ([...sp.keys()].length) {
+    Object.assign(listFilters, { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' });
+    for (const k of ['status', 'department', 'urgency', 'region', 'assigned']) {
+      if (sp.has(k)) listFilters[k] = sp.get(k);
+    }
+    history.replaceState(null, '', '/tickets');
+  }
   const showDept = ['SuperAdmin', 'Leader'].includes(state.user.role);
   const showRegion = ['SuperAdmin', 'AdminIT', 'AdminME', 'Leader'].includes(state.user.role);
   const isTech = state.user.role.startsWith('Technician');
@@ -871,26 +900,6 @@ function ticketRow(t) {
 }
 
 // ==========================================================================
-// View: Queue (admins) — unassigned / new
-// ==========================================================================
-async function renderQueue() {
-  view().innerHTML = `<div class="page-head"><h2>Queue</h2><p>New & unassigned tickets awaiting dispatch</p></div><div id="queue-list" class="ticket-list">${skeletonRows()}</div>`;
-  try {
-    const all = await api.tickets();
-    const rows = all.filter((t) => !t.assigned_technician_id && !['Closed', 'Cancelled', 'Resolved'].includes(t.status));
-    const box = $('#queue-list');
-    if (!rows.length) { box.innerHTML = emptyBox('inbox', 'Queue is clear', 'No unassigned tickets right now. 🎉'); return; }
-    box.innerHTML = rows.map((t) => `<div class="ticket-row" data-id="${t.id}">
-      <div>${deptTag(t.department)}</div>
-      <div style="min-width:0"><div class="tnum">${esc(t.ticket_number)}</div><div class="ttitle">${esc(t.title)}</div>
-        <div class="tmeta"><span>${esc(t.outlet_code)}</span><span>${esc(t.category)}</span><span class="aging ${agingClass(t)}">${timeAgo(t.created_at)}</span></div></div>
-      <div class="tbadges">${urgBadge(t.urgency)}<button class="btn-primary" data-assign="${t.id}" style="padding:7px 12px">Assign</button></div></div>`).join('');
-    $$('.ticket-row', box).forEach((el) => el.addEventListener('click', (e) => { if (e.target.closest('[data-assign]')) return; navigate('/tickets/' + el.dataset.id); }));
-    $$('[data-assign]', box).forEach((b) => b.addEventListener('click', async (e) => { e.stopPropagation(); const t = rows.find((x) => x.id == b.dataset.assign); await openAssignModal(t, () => renderQueue()); }));
-  } catch (e) { $('#queue-list').innerHTML = errBox(e); }
-}
-
-// ==========================================================================
 // View: Ticket detail
 // ==========================================================================
 let detailUploader = null;
@@ -899,7 +908,7 @@ async function renderTicketDetail(id) {
   let data;
   try { data = await api.ticket(id); }
   catch (e) { view().innerHTML = `<div class="page-head"><a href="/tickets" data-nav class="muted">← Back</a></div>${errBox(e)}`; wireNavLinks(); return; }
-  const { ticket: t, comments, activity, attachments, assignments } = data;
+  const { ticket: t, comments, activity, attachments, assignments, primaryTechnician, collaborators } = data;
   const u = state.user;
   const isDeptAdmin = u.role === 'SuperAdmin' || (u.role === 'AdminIT' && t.department === 'IT') || (u.role === 'AdminME' && t.department === 'ME');
   const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
@@ -922,22 +931,27 @@ async function renderTicketDetail(id) {
     <div class="page-head"><a href="/tickets" data-nav class="muted">← Back to list</a></div>
     <div class="detail-top">
       <div style="flex:1;min-width:0">
-        <div class="tnum">${esc(t.ticket_number || '#' + t.id)} · ${deptTag(t.department)} ${esc(t.category || '')}</div>
+        <div class="tnum">${esc(t.ticket_number || '#' + t.id)}${t.outlet_name ? ' - ' + esc(t.outlet_name) : ''}</div>
         <h2>${esc(t.title)}</h2>
+        <div class="detail-headline">${deptTag(t.department)} <span class="muted">${esc(t.category || '—')}</span> · ${badge(t.status)} · ${urgBadge(t.urgency)}</div>
         <div class="aging ${agingClass(t)}">Reported ${fmtDate(t.created_at)} · ${timeAgo(t.created_at)}</div>
       </div>
-      <div class="detail-badges">${urgBadge(t.urgency)}${badge(t.status)}${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
+      <div class="detail-badges">${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
     </div>
     <div class="detail-grid">
       <div>
         <div class="card mb">
           <dl class="info-list">
-            <dt>Outlet</dt><dd>${esc(t.outlet_code || '—')} ${t.brand_code ? '· ' + esc(t.brand_code) : ''}</dd>
+            <dt>Outlet</dt><dd>${esc(t.outlet_name || t.outlet_code || '—')}${(t.outlet_name && t.outlet_code && t.outlet_name !== t.outlet_code) ? ` <span class="muted">(${esc(t.outlet_code)})</span>` : ''}${t.brand_code ? ' · ' + esc(t.brand_code) : ''}</dd>
+            <dt>Department</dt><dd>${deptTag(t.department)}</dd>
+            <dt>Category</dt><dd>${esc(t.category || '—')}</dd>
+            <dt>Status</dt><dd>${badge(t.status)}</dd>
             ${t.source === 'public_quick_report' ? '<dt>Source</dt><dd><span class="badge src-public">Public Quick Report</span></dd>' : ''}
             <dt>${t.source === 'public_quick_report' ? 'Reporter' : 'Requester'}</dt><dd>${esc(t.public_reporter_name || t.customer_name || '—')}</dd>
             <dt>Contact</dt><dd>${esc(t.public_reporter_contact || t.contact_number || '—')}</dd>
-            <dt>Primary Tech</dt><dd>${primaryTechnician ? esc(primaryTechnician.technician_name) : esc(t.assignee_name || 'Unassigned')}</dd>
-            ${(collaborators && collaborators.length) ? `<dt>Collaborators</dt><dd>${collaborators.map(c => `<span class="badge" style="margin-right:4px">${esc(c.technician_name)}</span>`).join('')}</dd>` : ''}
+            <dt>Primary Technician / PIC</dt><dd>${primaryTechnician ? `${esc(primaryTechnician.technician_name)} <span class="badge badge-pic">PIC / Primary</span>` : (t.assignee_name && t.assignee_name !== 'Unassigned' ? `${esc(t.assignee_name)} <span class="badge badge-pic">PIC / Primary</span>` : '<span class="muted">Unassigned</span>')}</dd>
+            ${(collaborators && collaborators.length) ? `<dt>Collaborators</dt><dd>${collaborators.map(c => `<span class="badge badge-collab" style="margin-right:4px">${esc(c.technician_name)} · Collaborator</span>`).join('')}</dd>` : ''}
+            <dt>Created</dt><dd>${fmtDate(t.created_at)}</dd>
             ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
             ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}
             ${t.location_detail ? `<dt>Location</dt><dd>${esc(t.location_detail)}</dd>` : ''}
@@ -1025,8 +1039,14 @@ function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
     html += `<div class="field"><label>Assignment</label><div class="row"><div style="flex:1">${esc(t.assignee_name || 'Unassigned')}</div><button class="btn-outline" id="btn-assign" style="padding:7px 12px">${t.assigned_technician_id ? 'Reassign' : 'Assign'}</button></div></div>`;
   }
   // Status controls
-  const opts = isDeptAdmin ? STATUSES : TECH_STATUSES;
-  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
+  // Simplified daily flow (New → Open → On Progress → Closed) for both admins and
+  // technicians. The ticket's own status is always kept as an option so a ticket
+  // sitting in a legacy status (e.g. Waiting Sparepart) is never silently
+  // overwritten and can still move forward; admins additionally keep Cancelled.
+  const opts = [...CORE_STATUSES];
+  if (!opts.includes(t.status)) opts.push(t.status);
+  if (isDeptAdmin && !opts.includes('Cancelled')) opts.push('Cancelled');
+  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`;
   if (isDeptAdmin) {
     html += `<div class="field"><label>Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
   }
@@ -1890,7 +1910,6 @@ function userRow(u) {
   let access = u.all_brands ? 'All brands' : (u.brand || '—');
   if (u.all_outlets) access += ' · all outlets';
   else if (u.outlet_access && u.outlet_access.length) access += ` · ${u.outlet_access.length} PIC outlet(s)`;
-  if (u.region) access += ` · ${u.region}`;
   return `<tr>
     <td><strong>${esc(u.username)}</strong> ${self ? '<span class="muted">(you)</span>' : ''}</td>
     <td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.department || '—')}</td>
@@ -1919,7 +1938,6 @@ async function openUserModal(u, after) {
   try { [brands, outlets] = await Promise.all([api.brands(), api.allOutlets().catch(() => api.outlets())]); }
   catch (_) {}
   const brandOptions = [{ value: '', label: '— None —' }, ...brands.map((b) => ({ value: b.code, label: `${b.code} — ${b.name}` }))];
-  const regionOptions = [{ value: '', label: '— None —' }, ...REGIONS.map((r) => ({ value: r, label: r }))];
   const outletOptions = outlets.map((o) => ({ value: o.code, label: `${o.code}${o.region ? ' · ' + o.region : ''} (${o.brand_code})` }));
 
   const isAdminOrSuper = ['SuperAdmin', 'AdminIT', 'AdminME'].includes(state.user ? state.user.role : '');
@@ -1930,7 +1948,6 @@ async function openUserModal(u, after) {
     { name: 'role', label: 'Role', type: 'select', value: u ? u.role : 'Requestor', options: assignableRoles().map((r) => ({ value: r, label: r })) },
     { name: 'brand', label: 'Brand', type: 'select', value: u ? (u.brand || '') : '', options: brandOptions, hint: 'Single brand access (leave None for requestors or all-brand staff).' },
     { name: 'all_brands', label: '', type: 'checkbox', checkboxLabel: 'All-brand access', value: u ? !!u.all_brands : false },
-    { name: 'region', label: 'Region', type: 'select', value: u ? (u.region || '') : '', options: regionOptions },
     { name: 'pic_area', label: 'PIC area (technician label, optional)', value: u ? (u.pic_area || '') : '', placeholder: 'e.g. IT Area 1' },
     ...(isAdminOrSuper ? [
       { name: 'outlet_access', label: 'PIC outlet coverage (technician scope)', type: 'multiselect', value: u ? (u.outlet_access || []) : [], options: outletOptions, hint: 'Tickets from these outlets appear in the technician default list.' },
@@ -1946,7 +1963,7 @@ async function openUserModal(u, after) {
   const payload = {
     username: v.username, email: v.email, role: v.role,
     brand: v.brand || null, all_brands: v.all_brands,
-    region: v.region || null, pic_area: v.pic_area || null,
+    pic_area: v.pic_area || null,
     can_close_override: v.can_close_override, is_active: v.is_active,
   };
   if (isAdminOrSuper) {
@@ -2337,6 +2354,106 @@ async function confirmDeleteOutlet(o, after) {
   } catch (e) {
     toast(e.message, 'error');
   }
+}
+
+// ==========================================================================
+// View: Import / Export (CSV) — SuperAdmin (import) + admins (export)
+// ==========================================================================
+const IE_MODULES = [
+  { key: 'users', label: 'Users', file: 'users.csv', cols: 'username, email, role, department, phone, is_active', upsert: 'Updates existing users matched by email. New emails are reported as errors — create new users on the Users page.' },
+  { key: 'locations', label: 'Locations', file: 'locations.csv', cols: 'code, name, brand_code, region, active', upsert: 'Adds new outlets and updates existing ones, matched by code.' },
+  { key: 'schedules', label: 'Schedules', file: 'schedules.csv', cols: 'technician_email, day_of_week, start_time, end_time, active', upsert: 'Matched by technician + day_of_week + start/end time. day_of_week is 0 (Sun) – 6 (Sat).' },
+];
+async function renderImportExport() {
+  const isSuper = state.user.role === 'SuperAdmin';
+  view().innerHTML = `
+    <div class="page-head"><h2>Import / Export</h2><p>${isSuper ? 'Export or bulk-import Users, Locations and Schedules as CSV.' : 'Export data as CSV. Importing is restricted to SuperAdmin.'}</p></div>
+    <div class="ie-grid">
+      ${IE_MODULES.map((m) => `
+        <div class="panel">
+          <div class="panel-head"><h3>${esc(m.label)}</h3></div>
+          <div class="card" style="border:none">
+            <p class="muted" style="font-size:.8rem;margin-bottom:4px">Columns</p>
+            <p style="font-size:.8rem;margin-bottom:8px"><code>${esc(m.cols)}</code></p>
+            <p class="hint" style="padding:0 0 12px">${esc(m.upsert)}</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn-outline" data-export="${m.key}" data-file="${m.file}">⬇ Export</button>
+              ${isSuper ? `<button class="btn-primary" data-import="${m.key}">⬆ Import</button>` : ''}
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  $$('[data-export]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await downloadExport(b.dataset.export, b.dataset.file); toast('Export downloaded', 'success'); }
+    catch (e) { toast(e.message, 'error'); }
+    finally { b.disabled = false; }
+  }));
+  $$('[data-import]').forEach((b) => b.addEventListener('click', () => openImportModal(b.dataset.import)));
+}
+// Export downloads via rawFetch (keeps cookie auth + 401 re-auth), then saves the blob.
+async function downloadExport(module, filename) {
+  const res = await rawFetch('/api/export/' + module, { method: 'GET' });
+  if (!res.ok) { let m = 'Export failed'; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(m); }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// Import: pick a CSV → dry-run validate → preview → confirm → apply.
+function openImportModal(module) {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.csv,text/csv,text/plain';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    let text;
+    try { text = await file.text(); } catch (_) { toast('Could not read file', 'error'); return; }
+    try {
+      const res = await api.importData(module, text, true); // dry run — no writes
+      showImportPreview(module, text, res);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  input.click();
+}
+function showImportPreview(module, csvText, res) {
+  const s = res.summary || { total: 0, valid: 0, invalid: 0, toInsert: 0, toUpdate: 0 };
+  const canApply = s.invalid === 0 && s.valid > 0;
+  const errRows = (res.errors || []).slice(0, 200).map((e) => `<tr><td>${esc(e.row)}</td><td class="muted">${esc(e.message)}</td></tr>`).join('');
+  const dataCols = (res.preview && res.preview[0]) ? Object.keys(res.preview[0]).filter((c) => c !== 'action') : [];
+  const prevRows = (res.preview || []).map((p) => `<tr><td><span class="badge ${p.action === 'insert' ? 'st-New' : 'st-Assigned'}">${esc(p.action)}</span></td>${dataCols.map((c) => `<td>${esc(p[c])}</td>`).join('')}</tr>`).join('');
+  openModal({
+    title: `Import ${module} — preview`,
+    size: 'lg',
+    bodyHTML: `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <span class="badge st-New">${s.total} rows</span>
+        <span class="badge st-Resolved">${s.valid} valid</span>
+        ${s.invalid ? `<span class="badge st-Cancelled">${s.invalid} invalid</span>` : ''}
+        <span class="badge st-Assigned">${s.toInsert} insert</span>
+        <span class="badge st-OnProgress">${s.toUpdate} update</span>
+      </div>
+      ${s.invalid ? `<div class="hint" style="color:var(--danger);padding:0 0 6px">Import is all-or-nothing — fix the invalid row(s) below and re-upload; nothing is written until every row is valid.</div>
+        <div class="table-wrap" style="max-height:160px;overflow:auto"><table class="data"><thead><tr><th>Row</th><th>Error</th></tr></thead><tbody>${errRows}</tbody></table></div>` : ''}
+      ${dataCols.length ? `<div style="font-size:.82rem;font-weight:600;margin:12px 0 4px">Preview (first ${(res.preview || []).length})</div>
+        <div class="table-wrap" style="max-height:240px;overflow:auto"><table class="data"><thead><tr><th>Action</th>${dataCols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${prevRows}</tbody></table></div>` : '<p class="muted">No valid rows to preview.</p>'}`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-apply ${canApply ? '' : 'disabled'}>Apply import</button>`,
+    onMount(ov, close) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      const applyBtn = $('[data-apply]', ov);
+      if (applyBtn && canApply) applyBtn.addEventListener('click', async () => {
+        applyBtn.disabled = true; applyBtn.textContent = 'Applying…';
+        try {
+          const r = await api.importData(module, csvText, false);
+          toast(`Imported ${module}: ${r.summary.applied} applied (${r.summary.toInsert} new, ${r.summary.toUpdate} updated)`, 'success');
+          close();
+          if (state.route && state.route.name === module) route();
+        } catch (e) { toast(e.message, 'error'); applyBtn.disabled = false; applyBtn.textContent = 'Apply import'; }
+      });
+    },
+  });
 }
 
 // ==========================================================================

@@ -22,6 +22,7 @@ const crypto = require("crypto");
 const db = require("../../database");
 const { rateLimit } = require("../middleware/auth");
 const { DEPARTMENTS, URGENCIES } = require("../config/constants");
+const { APP_URL } = require("../config/env");
 const { nextTicketNumber } = require("../utils/ticketNumber");
 const { logActivity } = require("../services/auditLog.service");
 const { validateFile } = require("../services/upload.service");
@@ -219,11 +220,12 @@ router.post(
       });
       // WhatsApp acknowledgement to the reporter.
       const displayTicketNumber = outlet.code ? `${ticketNumber} - ${outlet.code}` : ticketNumber;
+      const publicTrackUrl = `${APP_URL}/track/${ticketNumber}?token=${rawToken}`;
       notify("ticket.created", {
         ticketId,
         ticketNumber: displayTicketNumber,
         recipients: [{ name: reporterName, phone: reporterContact }],
-        message: `Tiket pelaporan anda sudah dibuat. Nomor tiket anda: ${displayTicketNumber}`,
+        message: `Tiket pelaporan anda telah berhasil dibuat!\n\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${publicTrackUrl}`,
         channels: ["whatsapp"],
       });
 
@@ -244,7 +246,8 @@ router.post(
       }
 
       if (techWaRecipients.length > 0) {
-        const groupAlertMessage = `🚨 *TIKET BARU (PUBLIC QUICK REPORT)* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${reporterName}${reporterContact ? ' (' + reporterContact + ')' : ''}\n• *Judul*: ${b.title || '—'}\n• *Deskripsi*: ${b.description || '—'}`;
+        const ticketUrl = `${APP_URL}/tickets/${ticketId}`;
+        const groupAlertMessage = `🚨 *TIKET BARU (PUBLIC QUICK REPORT)* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${reporterName}${reporterContact ? ' (' + reporterContact + ')' : ''}\n• *Deskripsi*: ${b.description || '—'}`;
         notify("ticket.created", {
           ticketId,
           ticketNumber: displayTicketNumber,

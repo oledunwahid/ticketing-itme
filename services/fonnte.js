@@ -1,5 +1,5 @@
 const CONFIG = {
-  fonnteToken: process.env.FONNTE_TOKEN || 'P2kK4X5xV8xLXZhe8ELZ',
+  fonnteToken: process.env.FONNTE_TOKEN || 'Wu2xW5TcrCS8xQg8j6Xu',
   fonnteEndpoint: process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send',
 };
 

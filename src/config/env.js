@@ -41,6 +41,7 @@ const DB_PATH = process.env.DB_PATH
   ? path.resolve(process.env.DB_PATH)
   : path.resolve(PROJECT_ROOT, "tickets.db");
 const JWT_SECRET = process.env.JWT_SECRET || "union-dev-secret-change-me";
+const APP_URL = process.env.APP_URL || "http://theuniongroup.synology.me:3001";
 
 // Same guard as before: refuse to boot in production without a real secret.
 if (NODE_ENV === "production" && !process.env.JWT_SECRET) {
@@ -55,5 +56,6 @@ module.exports = {
   HOST,
   DB_PATH,
   JWT_SECRET,
+  APP_URL,
 };
 

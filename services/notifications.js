@@ -11,7 +11,7 @@ const { sendWhatsApp } = require('./fonnte');
 const CONFIG = {
   get emailEnabled() { return process.env.EMAIL_ENABLED === 'true'; },
   get whatsappEnabled() { return process.env.FONNTE_ENABLED !== 'false'; },
-  get fonnteToken() { return process.env.FONNTE_TOKEN || 'P2kK4X5xV8xLXZhe8ELZ'; },
+  get fonnteToken() { return process.env.FONNTE_TOKEN || 'Wu2xW5TcrCS8xQg8j6Xu'; },
   get fonnteDevice() { return process.env.FONNTE_DEVICE || ''; },
   get fonnteEndpoint() { return process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send'; },
 };

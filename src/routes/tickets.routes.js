@@ -16,6 +16,7 @@ const express = require("express");
 const crypto = require("crypto");
 const db = require("../../database");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { APP_URL } = require("../config/env");
 const {
   buildTicketScope,
   isAdmin,
@@ -957,7 +958,8 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
       channels: ["in_app"],
     });
 
-    const displayTicketNumber = outletCode ? `${ticketNumber} - ${outletCode}` : ticketNumber;
+    const displayTicketNumber = outlet.code ? `${ticketNumber} - ${outlet.code}` : ticketNumber;
+    const ticketUrl = `${APP_URL}/tickets/${ticketId}`;
 
     // Notify customer (WhatsApp) if a contact number was provided.
     if (b.contact_number) {
@@ -970,7 +972,7 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
             phone: b.contact_number,
           },
         ],
-        message: `Tiket pelaporan anda sudah dibuat tiket anda adalah : ${displayTicketNumber}`,
+        message: `Tiket pelaporan anda telah berhasil dibuat!\n\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}`,
         channels: ["whatsapp"],
       });
     }
@@ -992,7 +994,7 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
     }
 
     if (techWaRecipients.length > 0) {
-      const groupAlertMessage = `🚨 *TIKET BARU TERBUAT* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outletCode || '—'}\n• *Pelapor*: ${b.contact_person || requestorName}${b.contact_number ? ' (' + b.contact_number + ')' : ''}\n• *Judul*: ${b.title || '—'}\n• *Deskripsi*: ${b.description || '—'}`;
+      const groupAlertMessage = `🚨 *TIKET BARU TERBUAT* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${b.contact_person || requestorName}${b.contact_number ? ' (' + b.contact_number + ')' : ''}\n• *Deskripsi*: ${b.description || '—'}`;
       notify("ticket.created", {
         ticketId,
         ticketNumber: displayTicketNumber,

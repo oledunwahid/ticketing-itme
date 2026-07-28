@@ -1,6 +1,6 @@
 const CONFIG = {
-  fonnteToken: process.env.FONNTE_TOKEN || 'P2kK4X5xV8xLXZhe8ELZ',
-  fonnteEndpoint: process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send',
+  get fonnteToken() { return process.env.FONNTE_TOKEN || 'Wu2xW5TcrCS8xQg8j6Xu'; },
+  get fonnteEndpoint() { return process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send'; },
 };
 
 /**

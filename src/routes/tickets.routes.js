@@ -16,7 +16,6 @@ const express = require("express");
 const crypto = require("crypto");
 const db = require("../../database");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { APP_URL } = require("../config/env");
 const {
   buildTicketScope,
   isAdmin,
@@ -958,48 +957,18 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
       channels: ["in_app"],
     });
 
-    const displayTicketNumber = outlet.code ? `${ticketNumber} - ${outlet.code}` : ticketNumber;
-    const ticketUrl = `${APP_URL}/tickets/${ticketId}`;
-
     // Notify customer (WhatsApp) if a contact number was provided.
     if (b.contact_number) {
       notify("ticket.created", {
         ticketId,
-        ticketNumber: displayTicketNumber,
+        ticketNumber,
         recipients: [
           {
             name: b.contact_person || requestorName,
             phone: b.contact_number,
           },
         ],
-        message: `Tiket pelaporan anda telah berhasil dibuat!\n\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}`,
-        channels: ["whatsapp"],
-      });
-    }
-
-    // Notify Technicians / WhatsApp Group
-    const techGroupTarget = (department === 'ME' ? process.env.FONNTE_WA_GROUP_ME : process.env.FONNTE_WA_GROUP_IT) || process.env.FONNTE_WA_GROUP || '120363410098180945@g.us';
-    const techWaRecipients = [];
-    if (techGroupTarget) {
-      techWaRecipients.push({ name: `${department} Technician Group`, phone: techGroupTarget });
-    }
-    const techsWithPhone = await db.pAll(
-      `SELECT username, phone FROM users WHERE is_active = 1 AND phone IS NOT NULL AND phone != '' AND role IN ('SuperAdmin', ?, ?)`,
-      [department === "IT" ? "AdminIT" : "AdminME", department === "IT" ? "TechnicianIT" : "TechnicianME"]
-    );
-    for (const t of techsWithPhone) {
-      if (!techWaRecipients.some(r => r.phone === t.phone)) {
-        techWaRecipients.push({ name: t.username, phone: t.phone });
-      }
-    }
-
-    if (techWaRecipients.length > 0) {
-      const groupAlertMessage = `🚨 *TIKET BARU TERBUAT* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${b.contact_person || requestorName}${b.contact_number ? ' (' + b.contact_number + ')' : ''}\n• *Deskripsi*: ${b.description || '—'}`;
-      notify("ticket.created", {
-        ticketId,
-        ticketNumber: displayTicketNumber,
-        recipients: techWaRecipients,
-        message: groupAlertMessage,
+        message: `Tiket pelaporan anda sudah dibuat tiket anda adalah : ${ticketNumber}`,
         channels: ["whatsapp"],
       });
     }

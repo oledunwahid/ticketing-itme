@@ -1,6 +1,6 @@
 const { sendWhatsApp } = require('../services/fonnte');
 
-const token = "Wu2xW5TcrCS8xQg8j6Xu";
+const token = "P2kK4X5xV8xLXZhe8ELZ";
 const target = "083818317005";
 const message = "Tiket pelaporan anda sudah dibuat";
 

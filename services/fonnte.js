@@ -1,5 +1,5 @@
 const CONFIG = {
-  fonnteToken: process.env.FONNTE_TOKEN || 'Wu2xW5TcrCS8xQg8j6Xu',
+  fonnteToken: process.env.FONNTE_TOKEN || 'P2kK4X5xV8xLXZhe8ELZ',
   fonnteEndpoint: process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send',
 };
 
@@ -13,15 +13,8 @@ const CONFIG = {
 function formatPhoneNumber(phone) {
   if (!phone) return '';
 
-  const raw = String(phone).trim();
-
-  // Support WhatsApp Group targets (e.g. 120363xxx@g.us)
-  if (raw.includes('@g.us')) {
-    return raw;
-  }
-
   // Remove all non-numeric characters (keep only digits)
-  let cleaned = raw.replace(/\D/g, '');
+  let cleaned = String(phone).replace(/\D/g, '');
 
   // Handle local Indonesian prefix '0' (e.g., '0812...')
   if (cleaned.startsWith('0')) {
@@ -38,15 +31,14 @@ function formatPhoneNumber(phone) {
 }
 
 /**
- * Automatically send a WhatsApp message to the recipient's phone number or group using Fonnte API.
- * Handles phone number / group cleaning and formatting before sending.
+ * Automatically send a WhatsApp message to the recipient's phone number using Fonnte API.
+ * Handles phone number cleaning and formatting before sending.
  *
- * @param {string} phone - The recipient's phone/WhatsApp number or Group ID
+ * @param {string} phone - The recipient's phone/WhatsApp number
  * @param {string} ticketNumber - The generated ticket number
- * @param {string} [customMessage] - Optional custom message body
  * @returns {Promise<{success: boolean, data?: any, error?: string}>}
  */
-async function sendWhatsApp(phone, ticketNumber, customMessage) {
+async function sendWhatsApp(phone, ticketNumber) {
   try {
     const formattedPhone = formatPhoneNumber(phone);
     if (!formattedPhone) {
@@ -57,7 +49,7 @@ async function sendWhatsApp(phone, ticketNumber, customMessage) {
       throw new Error('Fonnte API Token is not configured.');
     }
 
-    const message = customMessage || `Tiket pelaporan anda sudah dibuat tiket anda adalah : ${ticketNumber}`;
+    const message = `Tiket pelaporan anda sudah dibuat tiket anda adalah : ${ticketNumber}`;
 
     const payload = {
       target: formattedPhone,

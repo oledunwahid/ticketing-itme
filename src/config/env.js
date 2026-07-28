@@ -9,30 +9,29 @@ const fs = require("fs");
 // Project root = two levels up from src/config/ (…/src/config -> …/src -> …/root)
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
-// Function to load/reload local .env file
-function loadEnv() {
-  try {
-    const envPath = path.join(PROJECT_ROOT, ".env");
-    if (fs.existsSync(envPath)) {
-      const envContent = fs.readFileSync(envPath, "utf8");
-      envContent.split(/\r?\n/).forEach(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) return;
-        const index = trimmed.indexOf("=");
-        if (index === -1) return;
-        const key = trimmed.substring(0, index).trim();
-        let val = trimmed.substring(index + 1).trim();
-        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-          val = val.slice(1, -1);
-        }
+// Load local .env file if present
+try {
+  const envPath = path.join(PROJECT_ROOT, ".env");
+  if (fs.existsSync(envPath)) {
+    const envContent = fs.readFileSync(envPath, "utf8");
+    envContent.split(/\r?\n/).forEach(line => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      const index = trimmed.indexOf("=");
+      if (index === -1) return;
+      const key = trimmed.substring(0, index).trim();
+      let val = trimmed.substring(index + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (process.env[key] === undefined) {
         process.env[key] = val;
-      });
-    }
-  } catch (e) {
-    console.warn("[env] Failed to load .env file:", e.message);
+      }
+    });
   }
+} catch (e) {
+  console.warn("[env] Failed to load .env file:", e.message);
 }
-loadEnv();
 
 const NODE_ENV = process.env.NODE_ENV;
 const PORT = process.env.PORT || 3001;
@@ -41,7 +40,6 @@ const DB_PATH = process.env.DB_PATH
   ? path.resolve(process.env.DB_PATH)
   : path.resolve(PROJECT_ROOT, "tickets.db");
 const JWT_SECRET = process.env.JWT_SECRET || "union-dev-secret-change-me";
-const APP_URL = process.env.APP_URL || "http://theuniongroup.synology.me:3001";
 
 // Same guard as before: refuse to boot in production without a real secret.
 if (NODE_ENV === "production" && !process.env.JWT_SECRET) {
@@ -56,6 +54,5 @@ module.exports = {
   HOST,
   DB_PATH,
   JWT_SECRET,
-  APP_URL,
 };
 

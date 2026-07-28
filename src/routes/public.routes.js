@@ -22,7 +22,6 @@ const crypto = require("crypto");
 const db = require("../../database");
 const { rateLimit } = require("../middleware/auth");
 const { DEPARTMENTS, URGENCIES } = require("../config/constants");
-const { APP_URL } = require("../config/env");
 const { nextTicketNumber } = require("../utils/ticketNumber");
 const { logActivity } = require("../services/auditLog.service");
 const { validateFile } = require("../services/upload.service");
@@ -219,43 +218,13 @@ router.post(
         channels: ["in_app"],
       });
       // WhatsApp acknowledgement to the reporter.
-      const displayTicketNumber = outlet.code ? `${ticketNumber} - ${outlet.code}` : ticketNumber;
-      const publicTrackUrl = `${APP_URL}/track/${ticketNumber}?token=${rawToken}`;
       notify("ticket.created", {
         ticketId,
-        ticketNumber: displayTicketNumber,
+        ticketNumber,
         recipients: [{ name: reporterName, phone: reporterContact }],
-        message: `Tiket pelaporan anda telah berhasil dibuat!\n\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${publicTrackUrl}`,
+        message: `Tiket pelaporan anda sudah dibuat. Nomor tiket anda: ${ticketNumber}`,
         channels: ["whatsapp"],
       });
-
-      // Notify Technicians / WhatsApp Group
-      const techGroupTarget = (department === 'ME' ? process.env.FONNTE_WA_GROUP_ME : process.env.FONNTE_WA_GROUP_IT) || process.env.FONNTE_WA_GROUP || '120363410098180945@g.us';
-      const techWaRecipients = [];
-      if (techGroupTarget) {
-        techWaRecipients.push({ name: `${department} Technician Group`, phone: techGroupTarget });
-      }
-      const techsWithPhone = await db.pAll(
-        `SELECT username, phone FROM users WHERE is_active = 1 AND phone IS NOT NULL AND phone != '' AND role IN ('SuperAdmin', ?, ?)`,
-        [department === "IT" ? "AdminIT" : "AdminME", department === "IT" ? "TechnicianIT" : "TechnicianME"]
-      );
-      for (const t of techsWithPhone) {
-        if (!techWaRecipients.some(r => r.phone === t.phone)) {
-          techWaRecipients.push({ name: t.username, phone: t.phone });
-        }
-      }
-
-      if (techWaRecipients.length > 0) {
-        const ticketUrl = `${APP_URL}/tickets/${ticketId}`;
-        const groupAlertMessage = `🚨 *TIKET BARU (PUBLIC QUICK REPORT)* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${reporterName}${reporterContact ? ' (' + reporterContact + ')' : ''}\n• *Deskripsi*: ${b.description || '—'}`;
-        notify("ticket.created", {
-          ticketId,
-          ticketNumber: displayTicketNumber,
-          recipients: techWaRecipients,
-          message: groupAlertMessage,
-          channels: ["whatsapp"],
-        });
-      }
 
       // Public-safe response only.
       res.status(201).json({

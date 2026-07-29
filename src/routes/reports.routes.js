@@ -12,7 +12,11 @@ const express = require("express");
 const db = require("../../database");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { buildTicketScope } = require("../utils/permissions");
-const { DEPARTMENTS } = require("../config/constants");
+const {
+  DEPARTMENTS,
+  STATUS_GROUPS,
+  statusesInGroup,
+} = require("../config/constants");
 const {
   getSlaTargets,
   enrichTicket,
@@ -46,7 +50,14 @@ async function scopedTicketSql(user, q) {
   if (q.region) add(" AND COALESCE(t.region, o.region, 'Jakarta') = ?", q.region);
   if (q.brand) add(" AND t.brand_code = ?", q.brand);
   if (q.outlet) add(" AND t.outlet_code = ?", q.outlet);
+  // Reports filter on the ACTUAL status. status_group is an optional extra
+  // (New/Open/On Progress/Closed/Cancelled) that expands to its member
+  // statuses — it never collapses or rewrites the stored value.
   if (q.status) add(" AND t.status = ?", q.status);
+  if (q.status_group && STATUS_GROUPS.includes(q.status_group)) {
+    const members = statusesInGroup(q.status_group);
+    add(` AND t.status IN (${members.map(() => "?").join(",")})`, ...members);
+  }
   if (q.category) add(" AND t.category = ?", q.category);
   if (q.urgency) add(" AND t.urgency = ?", q.urgency);
   if (q.technician) add(" AND t.assignee_name = ?", q.technician);

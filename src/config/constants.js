@@ -1,6 +1,37 @@
 /* ==========================================================================
    Config — domain constants
    ========================================================================== */
+/* --------------------------------------------------------------------------
+   Status model — two layers over ONE `tickets.status` column.
+
+   • CORE_STATUSES     the simplified daily workflow (New → Open → On Progress
+                       → Closed). This is what technicians see by default and
+                       what the dashboard cards are grouped into.
+   • EXTENDED_STATUSES operational/detail states kept for admin handling,
+                       scheduled event work (On Scheduled → printer/POS setup),
+                       sparepart/vendor waits, escalation, SLA/KPI reporting and
+                       historical tickets. They are NOT deprecated.
+   • ALL_STATUSES      everything the backend accepts and the DB may contain.
+
+   The core list is a *view* of the model, never a replacement for it: any
+   status in ALL_STATUSES is valid to store, filter, report and export.
+   -------------------------------------------------------------------------- */
+const CORE_STATUSES = ["New", "Open", "On Progress", "Closed"];
+const EXTENDED_STATUSES = [
+  "Assigned",
+  "On Scheduled",
+  "Waiting Sparepart",
+  "Waiting Vendor",
+  "Pending Outlet Response",
+  "Escalated",
+  "Resolved",
+  "Cancelled",
+];
+const ALL_STATUSES = [...CORE_STATUSES, ...EXTENDED_STATUSES];
+
+// STATUSES — the same set as ALL_STATUSES, kept in workflow order for filter
+// dropdowns, reports and exports. Retained under its original name because it
+// is the long-standing public constant used across routes/UI.
 const STATUSES = [
   "New",
   "Open",
@@ -15,10 +46,30 @@ const STATUSES = [
   "Closed",
   "Cancelled",
 ];
-// Core simplified daily-workflow statuses (New → Open → On Progress → Closed).
-// The full STATUSES list above is retained in the DB for reporting, SLA and
-// operational detail; CORE_STATUSES is only the visible/enforced daily flow.
-const CORE_STATUSES = ["New", "Open", "On Progress", "Closed"];
+
+/* --------------------------------------------------------------------------
+   Status grouping — for dashboard cards and summary reporting ONLY.
+   Grouping never rewrites a ticket's stored status; it is a read-side rollup.
+   -------------------------------------------------------------------------- */
+const STATUS_GROUPS = ["New", "Open", "On Progress", "Closed", "Cancelled"];
+const STATUS_GROUP_OF = {
+  New: "New",
+  Open: "Open",
+  Assigned: "Open",
+  "On Scheduled": "Open",
+  "Waiting Sparepart": "Open",
+  "Waiting Vendor": "Open",
+  "Pending Outlet Response": "Open",
+  Escalated: "Open",
+  "On Progress": "On Progress",
+  Resolved: "Closed",
+  Closed: "Closed",
+  Cancelled: "Cancelled",
+};
+// Unknown/legacy values fall into "Open" so nothing silently disappears from
+// the dashboard; the actual status is still shown everywhere it matters.
+const statusGroup = (s) => STATUS_GROUP_OF[s] || "Open";
+const statusesInGroup = (g) => STATUSES.filter((s) => statusGroup(s) === g);
 const URGENCIES = ["Low", "Medium", "High", "Critical"];
 const DEPARTMENTS = ["IT", "ME"];
 const ADMIN_ROLES = ["SuperAdmin", "AdminIT", "AdminME"];
@@ -36,7 +87,13 @@ const SLA_TARGET_MINUTES = {
 
 module.exports = {
   STATUSES,
+  ALL_STATUSES,
   CORE_STATUSES,
+  EXTENDED_STATUSES,
+  STATUS_GROUPS,
+  STATUS_GROUP_OF,
+  statusGroup,
+  statusesInGroup,
   URGENCIES,
   DEPARTMENTS,
   ADMIN_ROLES,

@@ -34,6 +34,8 @@ const {
   URGENCIES,
   ADMIN_ROLES,
   SLA_TARGET_MINUTES,
+  STATUS_GROUPS,
+  statusesInGroup,
 } = require("../config/constants");
 const {
   recommendTechnicians,
@@ -58,6 +60,7 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
       assigned,
       scope: techFilter,
       sort,
+      status_group: statusGroupFilter,
     } = req.query;
     const scope = await buildTicketScope(req.user, { techFilter });
     let sql = `SELECT * FROM tickets WHERE ${scope.clause}`;
@@ -68,6 +71,15 @@ router.get("/api/tickets", requireAuth, async (req, res) => {
     };
 
     if (status) add(" AND status = ?", status);
+    // Optional grouped filter (dashboard core-card drill-down). Expands to the
+    // real statuses in that group — the stored status is never rewritten.
+    if (statusGroupFilter && STATUS_GROUPS.includes(statusGroupFilter)) {
+      const members = statusesInGroup(statusGroupFilter);
+      add(
+        ` AND status IN (${members.map(() => "?").join(",")})`,
+        ...members,
+      );
+    }
     if (urgency) add(" AND urgency = ?", urgency);
     if (priority) add(" AND urgency = ?", priority); // legacy alias
     if (department && DEPARTMENTS.includes(department))
@@ -202,19 +214,42 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
       P,
     );
 
+    // Grouped counts for the core dashboard cards. Grouping is read-side only:
+    // an "Open" card counts Open/Assigned/On Scheduled/Waiting */Pending/
+    // Escalated tickets without touching their stored status.
+    const groupCount = (g) => {
+      const members = statusesInGroup(g);
+      if (!members.length) return 0;
+      return one(
+        ` AND status IN (${members.map(() => "?").join(",")})`,
+        members,
+      );
+    };
+    const byStatusGroup = [];
+    for (const g of STATUS_GROUPS) {
+      byStatusGroup.push({ status_group: g, c: await groupCount(g) });
+    }
+    const groupTotals = Object.fromEntries(
+      byStatusGroup.map((r) => [r.status_group, r.c]),
+    );
+
     const total = await one("");
-    const open = await one(` AND status NOT IN ('Closed','Cancelled')`);
-    const newCount = await one(` AND status = 'New'`);
+    const backlog = await one(` AND status NOT IN ('Closed','Cancelled')`);
+    const newCount = groupTotals["New"];
     const unassigned = await one(
       ` AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')`,
     );
+    const assigned = await one(` AND status = 'Assigned'`);
     const onScheduled = await one(` AND status = 'On Scheduled'`);
-    const onProgress = await one(` AND status = 'On Progress'`);
     const waitingSparepart = await one(` AND status = 'Waiting Sparepart'`);
     const waitingVendor = await one(` AND status = 'Waiting Vendor'`);
+    const pendingOutlet = await one(` AND status = 'Pending Outlet Response'`);
+    const escalated = await one(` AND status = 'Escalated'`);
     const waiting = waitingSparepart + waitingVendor;
+    const onProgress = await one(` AND status = 'On Progress'`);
     const resolved = await one(` AND status = 'Resolved'`);
     const closed = await one(` AND status = 'Closed'`);
+    const cancelled = groupTotals["Cancelled"];
     const createdToday = await one(
       ` AND date(created_at) = date('now','localtime')`,
     );
@@ -290,16 +325,28 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
       role: req.user.role,
       totals: {
         total,
-        open,
+        // Core cards (grouped) — New / Open / On Progress / Closed.
         new: newCount,
-        unassigned,
-        on_scheduled: onScheduled,
+        open: groupTotals["Open"],
         on_progress: onProgress,
+        // Closed card groups Resolved + Closed; `status_closed` is the exact
+        // Closed count for reporting parity.
+        closed: groupTotals["Closed"],
+        cancelled,
+        // Everything still open (any status except Closed/Cancelled).
+        backlog,
+        unassigned,
+        // Operational detail — exact statuses, never rolled up. These keep the
+        // scheduling / sparepart / vendor / escalation views visible.
+        assigned,
+        on_scheduled: onScheduled,
         waiting_sparepart: waitingSparepart,
         waiting_vendor: waitingVendor,
+        pending_outlet_response: pendingOutlet,
+        escalated,
         waiting,
         resolved,
-        closed,
+        status_closed: closed,
         created_today: createdToday,
         created_week: createdWeek,
         created_month: createdMonth,
@@ -313,6 +360,7 @@ router.get("/api/dashboard", requireAuth, async (req, res) => {
         targets: SLA_TARGET_MINUTES,
       },
       byStatus,
+      byStatusGroup,
       byUrgency,
       byDept,
       byBrand,
@@ -453,10 +501,14 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
 
     // Status change (with guards + timestamps)
     if (b.status && b.status !== ticket.status) {
-      // Technicians limited to a safe subset.
+      // Technicians limited to a safe subset: the core daily flow (minus New,
+      // which only the system sets) plus the operational states they own.
+      // "Closed" stays additionally gated by canClose() below.
       const techAllowed = [
-        "On Scheduled",
+        "Open",
         "On Progress",
+        "Closed",
+        "On Scheduled",
         "Waiting Sparepart",
         "Waiting Vendor",
         "Pending Outlet Response",

@@ -9,7 +9,12 @@
    can be overridden via app_settings(key='sla_targets') as JSON.
    ========================================================================== */
 const db = require("../../database");
-const { SLA_TARGET_MINUTES, STATUSES } = require("../config/constants");
+const {
+  SLA_TARGET_MINUTES,
+  STATUSES,
+  STATUS_GROUPS,
+  statusGroup,
+} = require("../config/constants");
 
 const OPEN_STATUSES = STATUSES.filter(
   (s) => !["Resolved", "Closed", "Cancelled"].includes(s),
@@ -143,7 +148,12 @@ function countBy(rows, key) {
 
 // Executive summary block over an enriched row set.
 function summarize(rows) {
+  // Reports always keep the ACTUAL status. byStatusGroup is an additional
+  // rollup (New / Open / On Progress / Closed / Cancelled) for summary views —
+  // it never replaces byStatus.
   const byStatus = countBy(rows, "status");
+  const byStatusGroup = Object.fromEntries(STATUS_GROUPS.map((k) => [k, 0]));
+  for (const r of rows) byStatusGroup[statusGroup(r.status)] += 1;
   const g = (s) => byStatus[s] || 0;
   const slaMet = rows.filter((r) => r.sla_status === "Met").length;
   const slaBreached = rows.filter((r) => r.sla_status === "Breached").length;
@@ -153,6 +163,7 @@ function summarize(rows) {
   return {
     total: rows.length,
     byStatus,
+    byStatusGroup,
     new: g("New"),
     open: rows.filter((r) => r.is_backlog).length,
     assigned: g("Assigned"),
@@ -160,6 +171,8 @@ function summarize(rows) {
     on_progress: g("On Progress"),
     waiting_sparepart: g("Waiting Sparepart"),
     waiting_vendor: g("Waiting Vendor"),
+    pending_outlet_response: g("Pending Outlet Response"),
+    escalated: g("Escalated"),
     resolved: g("Resolved"),
     closed: g("Closed"),
     cancelled: g("Cancelled"),
@@ -312,6 +325,17 @@ function buildInsights(agg, filters = {}) {
   if (waitTotal > 0)
     bullets.push(
       `Supply bottlenecks: ${s.waiting_sparepart} waiting sparepart, ${s.waiting_vendor} waiting vendor.`,
+    );
+
+  // Escalation & outlet-side blockers — extended statuses stay visible to
+  // managers instead of being folded into a generic "Open" bucket.
+  if (s.escalated > 0)
+    bullets.push(
+      `Escalated: ${s.escalated} ticket(s) currently escalated and needing management attention.`,
+    );
+  if (s.pending_outlet_response > 0)
+    bullets.push(
+      `Stuck on outlet: ${s.pending_outlet_response} ticket(s) pending outlet response.`,
     );
 
   return { summary, bullets };

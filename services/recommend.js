@@ -5,10 +5,13 @@
    Pure-ish: takes the db handle, returns a ranked list with reasons.
    ========================================================================== */
 
-// Statuses that count as "active workload" on a technician.
+// Statuses that count as "active workload" on a technician — every status
+// except the terminal ones (Resolved/Closed/Cancelled). New/Open/On Scheduled
+// are included because assigning a technician no longer forces the status to
+// "Assigned": a ticket can sit in New/Open/On Scheduled and still be real work.
 const OPEN_ASSIGNED_STATUSES = [
-  'Assigned', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor',
-  'Pending Outlet Response', 'Escalated',
+  'New', 'Open', 'Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart',
+  'Waiting Vendor', 'Pending Outlet Response', 'Escalated',
 ];
 
 function toMinutes(hhmm) {

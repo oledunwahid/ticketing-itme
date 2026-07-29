@@ -4,14 +4,54 @@
 'use strict';
 
 // ---- Domain constants (mirror backend) ----
+// Status model (mirrors src/config/constants.js). Two layers over one column:
+//   CORE      — the simplified daily flow (New → Open → On Progress → Closed)
+//   EXTENDED  — operational states kept for admin handling, scheduled event
+//               work (On Scheduled), sparepart/vendor waits, escalation, SLA
+//               reporting and historical tickets. Never removed.
+const CORE_STATUSES = ['New', 'Open', 'On Progress', 'Closed'];
+const EXTENDED_STATUSES = ['Assigned', 'On Scheduled', 'Waiting Sparepart', 'Waiting Vendor',
+  'Pending Outlet Response', 'Escalated', 'Resolved', 'Cancelled'];
+// Full list in workflow order — used by filters, reports and exports.
 const STATUSES = ['New', 'Open', 'Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart',
   'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'];
-// Core simplified daily-workflow statuses shown in the ticket status control.
-// Full STATUSES is kept for filters/reporting; CORE_STATUSES is the daily flow.
-const CORE_STATUSES = ['New', 'Open', 'On Progress', 'Closed'];
+// Read-side rollup for dashboard cards only — it never rewrites a ticket status.
+const STATUS_GROUP_OF = {
+  'New': 'New',
+  'Open': 'Open', 'Assigned': 'Open', 'On Scheduled': 'Open', 'Waiting Sparepart': 'Open',
+  'Waiting Vendor': 'Open', 'Pending Outlet Response': 'Open', 'Escalated': 'Open',
+  'On Progress': 'On Progress',
+  'Resolved': 'Closed', 'Closed': 'Closed',
+  'Cancelled': 'Cancelled',
+};
+const statusGroup = (s) => STATUS_GROUP_OF[s] || 'Open';
+// Allowed next statuses (mirrors src/utils/statusTransition.js). Used only to
+// keep the dropdown honest — the server remains the enforcer. Unknown/legacy
+// current statuses stay permissive so old tickets can always move forward.
+const ALLOWED_TRANSITIONS = {
+  'New': ['Open', 'Assigned', 'On Scheduled', 'On Progress', 'Escalated', 'Cancelled'],
+  'Open': ['Assigned', 'On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Cancelled'],
+  'Assigned': ['Open', 'On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Cancelled'],
+  'On Scheduled': ['Open', 'Assigned', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Cancelled'],
+  'On Progress': ['Open', 'Assigned', 'On Scheduled', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved', 'Closed', 'Cancelled'],
+  'Waiting Sparepart': ['On Progress', 'On Scheduled', 'Escalated', 'Resolved', 'Cancelled'],
+  'Waiting Vendor': ['On Progress', 'On Scheduled', 'Escalated', 'Resolved', 'Cancelled'],
+  'Pending Outlet Response': ['On Progress', 'On Scheduled', 'Escalated', 'Resolved', 'Cancelled'],
+  'Escalated': ['On Progress', 'On Scheduled', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Resolved', 'Cancelled'],
+  'Resolved': ['Closed', 'On Progress', 'Escalated', 'Cancelled'],
+  'Closed': ['Open', 'On Progress'],
+  'Cancelled': ['Open', 'New'],
+};
+function canTransition(current, next) {
+  if (current === next) return true;
+  const allowed = ALLOWED_TRANSITIONS[current];
+  return allowed ? allowed.includes(next) : true;
+}
 const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
 const REGIONS = ['Jakarta', 'Surabaya'];
-const TECH_STATUSES = ['On Scheduled', 'On Progress', 'Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
+// Statuses a technician may set (mirrors the server-side techAllowed list).
+const TECH_STATUSES = ['Open', 'On Progress', 'Closed', 'On Scheduled', 'Waiting Sparepart',
+  'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
 const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
@@ -734,19 +774,19 @@ async function renderDashboard() {
     const deptCount = (dep) => ((d.byDept || []).find((x) => x.department === dep) || {}).c || 0;
     const deptCards = state.user.role === 'AdminIT' ? ['IT'] : state.user.role === 'AdminME' ? ['ME'] : ['IT', 'ME'];
     const st = (s) => '/tickets?status=' + encodeURIComponent(s);
+    // Core cards are grouped counts (e.g. Open also covers Assigned, On
+    // Scheduled, Waiting *, Pending Outlet Response, Escalated) and drill down
+    // via status_group so the list matches the number on the card.
+    const grp = (g) => '/tickets?status_group=' + encodeURIComponent(g);
     $('#d-stats').innerHTML = `
-      ${dashCard(T.new || 0, 'New', 'primary', st('New'))}
-      ${dashCard(T.open || 0, 'Open', 'warn', st('Open'))}
-      ${dashCard(T.on_progress || 0, 'On Progress', 'warn', st('On Progress'))}
-      ${dashCard(T.closed || 0, 'Closed', 'ok', st('Closed'))}
+      ${dashCard(T.new || 0, 'New', 'primary', grp('New'))}
+      ${dashCard(T.open || 0, 'Open', 'warn', grp('Open'))}
+      ${dashCard(T.on_progress || 0, 'On Progress', 'warn', grp('On Progress'))}
+      ${dashCard(T.closed || 0, 'Closed', 'ok', grp('Closed'))}
       ${dashCard(T.unassigned || 0, 'Unassigned', 'danger', '/tickets?assigned=no')}
       ${deptCards.map((dep) => dashCard(deptCount(dep), dep + ' tickets', 'primary', '/tickets?department=' + dep)).join('')}`;
     animateCounters($('#d-stats'));
-    $$('#d-stats [data-goto]').forEach((el) => {
-      const go = () => navigate(el.dataset.goto);
-      el.addEventListener('click', go);
-      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
-    });
+    wireCardLinks('#d-stats');
     const distMax = Math.max(1, ...d.byStatus.map((s) => s.c));
     // Dashboard stays glanceable: a compact SLA snapshot only. The full SLA/KPI
     // analysis, technician performance and manager insights live in the
@@ -763,8 +803,27 @@ async function renderDashboard() {
         </div>
         <div class="hint" style="padding:0 4px 4px">Full technician rankings, outlet/region analysis, SLA detail &amp; manager insights → Reporting &amp; Performance.</div>
       </div>` : '';
+    // Operational detail — the extended statuses rolled into the "Open" card
+    // above. Kept visible so scheduled work and sparepart/vendor/escalation
+    // bottlenecks never disappear from view.
+    const opsCards = [
+      ['On Scheduled', T.on_scheduled],
+      ['Waiting Sparepart', T.waiting_sparepart],
+      ['Waiting Vendor', T.waiting_vendor],
+      ['Pending Outlet Response', T.pending_outlet_response],
+      ['Escalated', T.escalated],
+      ['Assigned', T.assigned],
+    ].filter(([, n]) => n != null);
+    const opsSection = opsCards.length ? `
+      <div class="panel mt"><div class="panel-head"><h3>Operational status</h3>
+        <span class="muted" style="font-size:.8rem">Detail states grouped under Open</span></div>
+        <div class="stat-grid">
+          ${opsCards.map(([label, n]) => dashCard(n || 0, label, 'warn', st(label))).join('')}
+        </div>
+      </div>` : '';
     $('#d-rest').innerHTML = `
-      <div class="grid-2">
+      ${opsSection}
+      <div class="grid-2 mt">
         <div class="panel"><div class="panel-head"><h3>By status</h3></div><div class="card" style="border:none">
           ${d.byStatus.length ? d.byStatus.map((s) => `<div class="dist-row"><span>${badge(s.status)}</span><div class="row" style="flex:1;margin:0 12px"><div class="dist-bar ${stCls(s.status)}" style="width:${Math.round(s.c / distMax * 100)}%;background:currentColor;opacity:.5"></div></div><strong>${s.c}</strong></div>`).join('') : '<p class="muted">No data</p>'}
         </div></div>
@@ -788,8 +847,17 @@ async function renderDashboard() {
         </div></div>` : '')}
       </div>`;
     animateCounters($('#d-rest'));
+    wireCardLinks('#d-rest');
     const goRep = $('#d-goreport'); if (goRep) goRep.addEventListener('click', () => navigate('/reports'));
   } catch (e) { $('#d-rest').innerHTML = errBox(e); }
+}
+// Make [data-goto] stat cards clickable / keyboard-activatable.
+function wireCardLinks(sel) {
+  $$(sel + ' [data-goto]').forEach((el) => {
+    const go = () => navigate(el.dataset.goto);
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
 }
 function statCard(n, l, accent) { return `<div class="stat ${accent ? 'accent-' + accent : ''}"><span class="n">${esc(n)}</span><span class="l">${esc(l)}</span></div>`; }
 // Clickable dashboard summary card. `goto` is an in-app path the card links to.
@@ -821,7 +889,7 @@ function skeletonStats() { return Array(5).fill('<div class="stat"><span class="
 // View: Tickets list
 // ==========================================================================
 // scope = technician PIC filter; sort = created_asc (default) | created_desc | urgency
-const listFilters = { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' };
+const listFilters = { status: '', status_group: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' };
 const TECH_SCOPES = [
   { value: '', label: 'My PIC outlets' },
   { value: 'mine', label: 'Assigned to me' },
@@ -833,8 +901,8 @@ async function renderTickets() {
   // from a clean filter set, apply the query-string keys, then tidy the URL.
   const sp = new URLSearchParams(location.search);
   if ([...sp.keys()].length) {
-    Object.assign(listFilters, { status: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' });
-    for (const k of ['status', 'department', 'urgency', 'region', 'assigned']) {
+    Object.assign(listFilters, { status: '', status_group: '', urgency: '', department: '', region: '', search: '', scope: '', sort: '', assigned: '' });
+    for (const k of ['status', 'status_group', 'department', 'urgency', 'region', 'assigned']) {
       if (sp.has(k)) listFilters[k] = sp.get(k);
     }
     history.replaceState(null, '', '/tickets');
@@ -847,7 +915,7 @@ async function renderTickets() {
     <div class="toolbar">
       <div class="search"><input id="f-search" placeholder="Search subject, #, requester…" value="${esc(listFilters.search)}"></div>
       ${isTech ? `<select id="f-scope">${TECH_SCOPES.map((s) => `<option value="${s.value}" ${listFilters.scope === s.value ? 'selected' : ''}>${s.label}</option>`).join('')}</select>` : ''}
-      <select id="f-status"><option value="">All statuses</option>${STATUSES.map((s) => `<option ${listFilters.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select id="f-status">${statusFilterOptionsHTML()}</select>
       <select id="f-urg"><option value="">All urgency</option>${URGENCIES.map((s) => `<option ${listFilters.urgency === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       ${showDept ? `<select id="f-dept"><option value="">All depts</option><option ${listFilters.department === 'IT' ? 'selected' : ''}>IT</option><option ${listFilters.department === 'ME' ? 'selected' : ''}>ME</option></select>` : ''}
       ${showRegion ? `<select id="f-region"><option value="">All regions</option>${REGIONS.map((r) => `<option ${listFilters.region === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : ''}
@@ -859,13 +927,31 @@ async function renderTickets() {
     </div>
     <div id="ticket-list" class="ticket-list">${skeletonRows()}</div>`;
   $('#f-search').addEventListener('input', debounce((e) => { listFilters.search = e.target.value.trim(); loadTicketList(); }, 350));
-  $('#f-status').addEventListener('change', (e) => { listFilters.status = e.target.value; loadTicketList(); });
+  $('#f-status').addEventListener('change', (e) => {
+    const v = e.target.value;
+    // "g:" values filter by main status group, everything else by exact status.
+    listFilters.status_group = v.startsWith('g:') ? v.slice(2) : '';
+    listFilters.status = v.startsWith('g:') ? '' : v;
+    loadTicketList();
+  });
   $('#f-urg').addEventListener('change', (e) => { listFilters.urgency = e.target.value; loadTicketList(); });
   if (isTech) $('#f-scope').addEventListener('change', (e) => { listFilters.scope = e.target.value; loadTicketList(); });
   if (showDept) $('#f-dept').addEventListener('change', (e) => { listFilters.department = e.target.value; loadTicketList(); });
   if (showRegion) $('#f-region').addEventListener('change', (e) => { listFilters.region = e.target.value; loadTicketList(); });
   $('#f-sort').addEventListener('change', (e) => { listFilters.sort = e.target.value; loadTicketList(); });
   loadTicketList();
+}
+// Ticket-list status filter: exact statuses (the full model, unchanged) plus a
+// "Main flow" group shortcut used by the dashboard card drill-downs.
+function statusFilterOptionsHTML() {
+  const groups = ['New', 'Open', 'On Progress', 'Closed', 'Cancelled'];
+  const groupOpts = groups.map((g) =>
+    `<option value="g:${esc(g)}" ${listFilters.status_group === g ? 'selected' : ''}>${esc(g)} (all)</option>`).join('');
+  const exactOpts = STATUSES.map((s) =>
+    `<option value="${esc(s)}" ${listFilters.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('');
+  return `<option value="" ${!listFilters.status && !listFilters.status_group ? 'selected' : ''}>All statuses</option>`
+    + `<optgroup label="Main flow (grouped)">${groupOpts}</optgroup>`
+    + `<optgroup label="Exact status">${exactOpts}</optgroup>`;
 }
 function ticketsSubtitle() {
   const r = state.user.role;
@@ -1038,15 +1124,12 @@ function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
   if (isDeptAdmin) {
     html += `<div class="field"><label>Assignment</label><div class="row"><div style="flex:1">${esc(t.assignee_name || 'Unassigned')}</div><button class="btn-outline" id="btn-assign" style="padding:7px 12px">${t.assigned_technician_id ? 'Reassign' : 'Assign'}</button></div></div>`;
   }
-  // Status controls
-  // Simplified daily flow (New → Open → On Progress → Closed) for both admins and
-  // technicians. The ticket's own status is always kept as an option so a ticket
-  // sitting in a legacy status (e.g. Waiting Sparepart) is never silently
-  // overwritten and can still move forward; admins additionally keep Cancelled.
-  const opts = [...CORE_STATUSES];
-  if (!opts.includes(t.status)) opts.push(t.status);
-  if (isDeptAdmin && !opts.includes('Cancelled')) opts.push('Cancelled');
-  html += `<div class="field"><label>Update status</label><select id="act-status">${opts.map((s) => `<option ${s === t.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`;
+  // Status controls — technicians get the simplified daily flow, admins get the
+  // core flow plus an "Operational / advanced" group (On Scheduled, waiting
+  // states, escalation, Cancelled…). The ticket's own status is always kept as
+  // an option so a ticket sitting in an extended status is never silently
+  // overwritten and can still move forward.
+  html += `<div class="field"><label>Update status</label><select id="act-status">${statusOptionsHTML(t, isDeptAdmin)}</select></div>`;
   if (isDeptAdmin) {
     html += `<div class="field"><label>Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
   }
@@ -1054,6 +1137,31 @@ function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
   if (isDeptAdmin) html += `<button class="btn-ghost btn-block mt" id="act-advanced">Re-route dept / category</button>`;
   html += `</div>`;
   return html;
+}
+// Options for the "Update status" control.
+//  • Admin  → <optgroup "Main flow"> core + <optgroup "Operational / advanced">
+//             extended (On Scheduled stays available for event/printer setup).
+//  • Tech   → core daily flow only (New is display-only, it is never set by
+//             hand), plus whatever extended status the ticket already has.
+// The ticket's current status is always present and preselected, so an
+// extended-status ticket renders correctly instead of falling back to "New".
+function statusOptionsHTML(t, isDeptAdmin) {
+  const opt = (s) => `<option ${s === t.status ? 'selected' : ''}>${esc(s)}</option>`;
+  const reachable = (s) => s === t.status || canTransition(t.status, s);
+  if (isDeptAdmin) {
+    const core = CORE_STATUSES.filter(reachable);
+    const extended = EXTENDED_STATUSES.filter(reachable);
+    if (!CORE_STATUSES.includes(t.status) && !extended.includes(t.status)) extended.unshift(t.status);
+    return (core.length ? `<optgroup label="Main flow">${core.map(opt).join('')}</optgroup>` : '')
+      + (extended.length ? `<optgroup label="Operational / advanced">${extended.map(opt).join('')}</optgroup>` : '');
+  }
+  // Technician: core daily flow only (New is display-only), filtered to what the
+  // server would accept from a technician and to valid transitions. Closed and
+  // Cancelled are terminal for technicians — only an admin can reopen.
+  const terminal = ['Closed', 'Cancelled'].includes(t.status);
+  const opts = terminal ? [] : CORE_STATUSES.filter((s) => s !== 'New' && TECH_STATUSES.includes(s) && reachable(s));
+  if (!opts.includes(t.status)) opts.unshift(t.status);
+  return opts.map(opt).join('');
 }
 function wireActionPane(t, isDeptAdmin, isAssignedTech) {
   const selfBtn = $('#act-selfassign');
@@ -1109,7 +1217,8 @@ async function collectStatusExtras(t, newStatus) {
       { name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' },
     ], 'Set status');
   }
-  if (t.status === 'Closed') {
+  // Reopening a Closed or Cancelled ticket — admin-only server side, reason required.
+  if (t.status === 'Closed' || t.status === 'Cancelled') {
     return await formModal('Reopen ticket', [{ name: 'reason', label: 'Reason for reopening', type: 'textarea', required: true }], 'Reopen');
   }
   return {};
@@ -1637,7 +1746,10 @@ async function renderReports() {
         <div class="field"><label>Category</label><select id="r-cat"><option value="">All</option>${catNames.map((c) => `<option>${esc(c)}</option>`).join('')}</select></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>Status</label><select id="r-status"><option value="">All</option>${STATUSES.map((s) => `<option>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Status</label><select id="r-status"><option value="">All</option>
+          <optgroup label="Main flow (grouped)">${['New', 'Open', 'On Progress', 'Closed', 'Cancelled'].map((g) => `<option value="g:${esc(g)}">${esc(g)} (all)</option>`).join('')}</optgroup>
+          <optgroup label="Exact status">${STATUSES.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</optgroup>
+        </select></div>
         <div class="field"><label>Urgency</label><select id="r-urg"><option value="">All</option>${URGENCIES.map((s) => `<option>${s}</option>`).join('')}</select></div>
         <div class="field"><label>SLA status</label><select id="r-sla"><option value="">All</option>${['Met', 'Breached', 'At Risk', 'Not Started', 'On Track'].map((s) => `<option>${s}</option>`).join('')}</select></div>
         <div class="field"><label>Scheduled from</label><input type="date" id="r-sfrom"></div>
@@ -1659,7 +1771,13 @@ async function renderReports() {
     if (showDept && $('#r-dept') && $('#r-dept').value) q.append('department', $('#r-dept').value);
     const g = (id, key) => { const el = $(id); if (el && el.value) q.append(key, el.value); };
     g('#r-region', 'region'); g('#r-brand', 'brand'); g('#r-outlet', 'outlet');
-    g('#r-tech', 'technician'); g('#r-cat', 'category'); g('#r-status', 'status');
+    g('#r-tech', 'technician'); g('#r-cat', 'category');
+    // Status: exact value, or "g:<group>" → status_group (actual statuses kept).
+    const stEl = $('#r-status');
+    if (stEl && stEl.value) {
+      if (stEl.value.startsWith('g:')) q.append('status_group', stEl.value.slice(2));
+      else q.append('status', stEl.value);
+    }
     g('#r-urg', 'urgency'); g('#r-sla', 'sla_status');
     g('#r-from', 'start_date'); g('#r-to', 'end_date');
     g('#r-sfrom', 'scheduled_from'); g('#r-sto', 'scheduled_to');
@@ -1732,6 +1850,8 @@ function reportSummary(p) {
       ${statCard(s.on_progress, 'On Progress')}
       ${statCard(s.waiting_sparepart, 'Waiting Sparepart')}
       ${statCard(s.waiting_vendor, 'Waiting Vendor')}
+      ${statCard(s.pending_outlet_response || 0, 'Pending Outlet Response')}
+      ${statCard(s.escalated || 0, 'Escalated', 'danger')}
       ${statCard(s.resolved, 'Resolved', 'ok')}
       ${statCard(s.closed, 'Closed')}
       ${statCard(s.cancelled, 'Cancelled')}

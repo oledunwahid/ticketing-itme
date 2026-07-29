@@ -26,6 +26,14 @@ const {
   canClose,
 } = require("../utils/permissions");
 const { getVisibleTicket } = require("../services/tickets.service");
+const {
+  TERMINAL_STATUSES,
+  getTeam,
+  loadAssignableTechnician,
+  setPrimary,
+  addCollaborator,
+  removeAssignment,
+} = require("../services/assignment.service");
 const { validateTransition } = require("../utils/statusTransition");
 const { nextTicketNumber } = require("../utils/ticketNumber");
 const { logActivity } = require("../services/auditLog.service");
@@ -667,118 +675,62 @@ router.post(
       if (!adminScopeForTicket(req.user, ticket))
         return res.status(403).json({ error: "Wrong department" });
 
-      const { technician_id, action, role_type, reason, override } = req.body || {};
+      const { technician_id, action, role_type, reason, note, override } = req.body || {};
       if (!technician_id) {
         return res.status(400).json({ error: "technician_id is required" });
       }
+      const why = note || reason;
 
-      const tech = await db.pGet(
-        "SELECT id, username, email, phone, department, role, is_active FROM users WHERE id = ?",
-        [technician_id],
-      );
-      if (!tech || !isTechnician({ role: tech.role }))
-        return res.status(400).json({ error: "Not a valid technician" });
-      if (tech.is_active === 0)
-        return res.status(400).json({ error: "Technician is inactive" });
+      // "remove" is the only action that may target someone already on the team
+      // regardless of department, so it skips the assignable checks.
+      const loaded = await loadAssignableTechnician(technician_id, ticket, {
+        override: !!override || action === "remove",
+      });
+      if (loaded.error)
+        return res.status(loaded.status).json({ error: loaded.error });
+      const tech = loaded.tech;
 
-      const techDept = deptForRole(tech.role);
-      if (techDept !== ticket.department && !override) {
-        return res.status(400).json({
-          error: `Technician is ${techDept}, ticket is ${ticket.department}. Use override to force.`,
-        });
-      }
-
-      const currentPrimary = await db.pGet(
-        "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
-        [ticket.id]
-      );
-
-      let targetRole = role_type || (action === "add_collaborator" ? "collaborator" : action === "set_primary" ? "primary" : null);
-      if (!targetRole) {
-        targetRole = !currentPrimary ? "primary" : "collaborator";
-      }
+      const team = await getTeam(ticket.id);
+      const targetRole =
+        role_type ||
+        (action === "add_collaborator"
+          ? "collaborator"
+          : action === "set_primary"
+            ? "primary"
+            : null) ||
+        (!team.primary ? "primary" : "collaborator");
 
       if (action === "remove") {
-        await db.pRun(
-          "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND technician_id = ? AND active = 1",
-          [ticket.id, tech.id]
-        );
-
-        if (currentPrimary && currentPrimary.technician_id === tech.id) {
-          const nextCollaborator = await db.pGet(
-            `SELECT a.*, u.username FROM ticket_assignments a
-             JOIN users u ON u.id = a.technician_id
-             WHERE a.ticket_id = ? AND a.active = 1 AND a.technician_id != ?
-             ORDER BY a.assigned_at ASC LIMIT 1`,
-            [ticket.id, tech.id]
-          );
-          if (nextCollaborator) {
-            await db.pRun(
-              "UPDATE ticket_assignments SET role_type = 'primary' WHERE id = ?",
-              [nextCollaborator.id]
-            );
-            await db.pRun(
-              "UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [nextCollaborator.technician_id, nextCollaborator.username, ticket.id]
-            );
-          } else {
-            await db.pRun(
-              "UPDATE tickets SET assigned_technician_id = NULL, assignee_name = 'Unassigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [ticket.id]
-            );
-          }
-        }
-        await logActivity(ticket.id, req.user, "ticket.assignment_removed", `Removed technician ${tech.username}`);
+        const onTeam = team.active.some((a) => a.technician_id === tech.id);
+        if (!onTeam)
+          return res
+            .status(400)
+            .json({ error: "This technician is not assigned to this ticket." });
+        await removeAssignment(ticket, tech, req.user);
+      } else if (targetRole === "primary") {
+        if (team.primary && team.primary.technician_id === tech.id)
+          return res
+            .status(400)
+            .json({ error: "This technician is already the Primary Technician." });
+        await setPrimary(ticket, tech, req.user, why);
       } else {
-        if (targetRole === "primary") {
-          await db.pRun(
-            "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
-            [ticket.id]
-          );
-          await db.pRun(
-            "UPDATE ticket_assignments SET active = 0, is_active = 0, unassigned_at = CURRENT_TIMESTAMP WHERE ticket_id = ? AND technician_id = ? AND active = 1",
-            [ticket.id, tech.id]
-          );
-          await db.pRun(
-            "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, 'primary', 1, 1)",
-            [ticket.id, tech.id, req.user.id, reason || null]
-          );
+        // Collaborator — a technician is never on the team twice.
+        if (team.primary && team.primary.technician_id === tech.id)
+          return res
+            .status(400)
+            .json({ error: "This technician is already the Primary Technician." });
+        if (team.collaborators.some((c) => c.technician_id === tech.id))
+          return res
+            .status(400)
+            .json({ error: "This technician is already a Collaborator." });
+        const added = await addCollaborator(ticket, tech, req.user, why, "admin");
+        if (!added.added)
+          return res
+            .status(400)
+            .json({ error: "This technician is already assigned to this ticket." });
+      }
 
-          // Assignment must NOT change the ticket's status — leaving New/Open
-          // untouched fixes the bug where assigning a technician silently reset
-          // the status to "Assigned". Status only changes via explicit updates.
-          await db.pRun(
-            `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
-             assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
-             first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [tech.id, tech.username, ticket.id]
-          );
-          await logActivity(
-            ticket.id,
-            req.user,
-            "ticket.assigned",
-            `Assigned Primary Technician: ${tech.username}${reason ? " — " + reason : ""}`
-          );
-        } else {
-          const existingCollab = await db.pGet(
-            "SELECT 1 FROM ticket_assignments WHERE ticket_id = ? AND technician_id = ? AND active = 1",
-            [ticket.id, tech.id]
-          );
-          if (!existingCollab) {
-            await db.pRun(
-              "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, 'collaborator', 1, 1)",
-              [ticket.id, tech.id, req.user.id, reason || null]
-            );
-            await logActivity(
-              ticket.id,
-              req.user,
-              "ticket.collaborator_added",
-              `Added Collaborator: ${tech.username}${reason ? " — " + reason : ""}`
-            );
-          }
-        }
-
+      if (action !== "remove") {
         notify("ticket.assigned", {
           ticketId: ticket.id,
           recipients: [{ name: tech.username, email: tech.email, phone: tech.phone }],
@@ -793,6 +745,183 @@ router.post(
       res.status(500).json({ error: "Failed to update technician assignment" });
     }
   }
+);
+
+/* --------------------------------------------------------------------------
+   Collaborator invitations (technician-side)
+
+   GET  /api/tickets/:id/assignable-technicians  — candidates + availability
+   POST /api/tickets/:id/collaborators/invite    — invite one as Collaborator
+
+   Open to a dept admin OR a technician already on the ticket's team (Primary
+   or Collaborator). Everything else — requestors, unassigned technicians,
+   other-department technicians — is refused.
+   -------------------------------------------------------------------------- */
+
+// Shared gate. Returns { ticket, isTeamAdmin } or { error, status }.
+async function loadTicketForCollaboration(req) {
+  const ticket = await getVisibleTicket(req.user, req.params.id, {
+    techFilter: "all",
+  });
+  if (!ticket)
+    return { error: "Ticket not found or access denied", status: 404 };
+
+  const isTeamAdmin = adminScopeForTicket(req.user, ticket);
+  if (isTeamAdmin) return { ticket, isTeamAdmin };
+
+  if (!isTechnician(req.user))
+    return { error: "Only assigned technicians can invite collaborators.", status: 403 };
+  if (deptForRole(req.user.role) !== ticket.department)
+    return { error: "You can only invite technicians from the same department.", status: 403 };
+  const { active } = await getTeam(ticket.id);
+  const onTeam =
+    active.some((a) => a.technician_id === req.user.id) ||
+    ticket.assigned_technician_id === req.user.id;
+  if (!onTeam)
+    return { error: "Only assigned technicians can invite collaborators.", status: 403 };
+  return { ticket, isTeamAdmin: false };
+}
+
+router.get(
+  "/api/tickets/:id/assignable-technicians",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const loaded = await loadTicketForCollaboration(req);
+      if (loaded.error)
+        return res.status(loaded.status).json({ error: loaded.error });
+      const { ticket } = loaded;
+
+      const { primary, collaborators } = await getTeam(ticket.id);
+      // Availability/workload come from the same engine the admin
+      // recommendation list uses, so both screens agree.
+      const ranked = await recommendTechnicians(db, {
+        department: ticket.department,
+        categoryName: ticket.category,
+      });
+      const candidates = ranked.map((r) => ({
+        id: r.id,
+        username: r.username,
+        department: r.department || ticket.department,
+        workload: r.workload,
+        availability: r.availability,
+        available: r.available,
+        is_self: r.id === req.user.id,
+        is_primary: !!primary && primary.technician_id === r.id,
+        is_collaborator: collaborators.some((c) => c.technician_id === r.id),
+      }));
+
+      res.json({
+        ticket: {
+          id: ticket.id,
+          ticket_number: ticket.ticket_number,
+          title: ticket.title,
+          department: ticket.department,
+          category: ticket.category,
+          outlet_code: ticket.outlet_code,
+          outlet_name: ticket.outlet_name || ticket.outlet_code,
+          status: ticket.status,
+        },
+        primary: primary
+          ? { technician_id: primary.technician_id, technician_name: primary.technician_name }
+          : null,
+        collaborators: collaborators.map((c) => ({
+          technician_id: c.technician_id,
+          technician_name: c.technician_name,
+        })),
+        candidates,
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to list technicians" });
+    }
+  },
+);
+
+router.post(
+  "/api/tickets/:id/collaborators/invite",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const loaded = await loadTicketForCollaboration(req);
+      if (loaded.error)
+        return res.status(loaded.status).json({ error: loaded.error });
+      const { ticket, isTeamAdmin } = loaded;
+
+      if (TERMINAL_STATUSES.includes(ticket.status))
+        return res
+          .status(400)
+          .json({ error: "This ticket is already closed or cancelled." });
+
+      const { technician_id, note } = req.body || {};
+      if (!technician_id)
+        return res.status(400).json({ error: "technician_id is required" });
+      if (Number(technician_id) === req.user.id)
+        return res
+          .status(400)
+          .json({ error: "You are already assigned to this ticket." });
+
+      const tech = await db.pGet(
+        "SELECT id, username, email, phone, role, is_active FROM users WHERE id = ?",
+        [technician_id],
+      );
+      if (!tech || !isTechnician({ role: tech.role }))
+        return res.status(400).json({ error: "Not a valid technician" });
+      if (tech.is_active === 0)
+        return res.status(400).json({ error: "Technician is inactive" });
+      // No override here — invites never cross departments, for admins either.
+      if (deptForRole(tech.role) !== ticket.department)
+        return res
+          .status(400)
+          .json({ error: "You can only invite technicians from the same department." });
+
+      // Re-read the team immediately before inserting so a double-click cannot
+      // create two rows for the same technician.
+      const { primary, collaborators } = await getTeam(ticket.id);
+      if (primary && primary.technician_id === tech.id)
+        return res
+          .status(400)
+          .json({ error: "This technician is already the Primary Technician." });
+      if (collaborators.some((c) => c.technician_id === tech.id))
+        return res
+          .status(400)
+          .json({ error: "This technician is already a Collaborator." });
+
+      const added = await addCollaborator(
+        ticket,
+        tech,
+        req.user,
+        note,
+        isTeamAdmin ? "admin" : "invite",
+      );
+      // Lost a race with a concurrent identical invite (double-click): the row
+      // already exists, so report it as such instead of inventing a duplicate.
+      if (!added.added)
+        return res
+          .status(400)
+          .json({ error: "This technician is already assigned to this ticket." });
+
+      notify("ticket.assigned", {
+        ticketId: ticket.id,
+        recipients: [{ name: tech.username, email: tech.email, phone: tech.phone }],
+        message: `${req.user.username} invited you as Collaborator on ticket ${ticket.ticket_number}`,
+        channels: ["in_app"],
+      });
+
+      const team = await getTeam(ticket.id);
+      res.status(201).json({
+        success: true,
+        collaborator: { technician_id: tech.id, technician_name: tech.username },
+        primaryTechnician: team.primary,
+        collaborators: team.collaborators,
+        // Status is untouched by an invite — echoed so the client can prove it.
+        status: ticket.status,
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to invite collaborator" });
+    }
+  },
 );
 
 // --- Self-assignment (technicians) -----------------------------------------

@@ -104,6 +104,16 @@ async function recommendTechnicians(db, { department, categoryName, atDate = new
     score -= workload * 10; // prefer lighter workload
     reasons.push(`${workload} open ticket${workload === 1 ? '' : 's'}`);
 
+    // One short label for the UI. "Busy" covers a technician who has a shift
+    // today but is outside it right now; an explicit unavailability block wins.
+    const availability = offDuty
+      ? 'Off duty'
+      : available
+        ? 'Available now'
+        : !hasScheduleToday
+          ? 'No schedule today'
+          : 'Busy';
+
     results.push({
       id: t.id,
       username: t.username,
@@ -111,6 +121,8 @@ async function recommendTechnicians(db, { department, categoryName, atDate = new
       workload,
       available,
       off_duty: offDuty,
+      has_schedule_today: hasScheduleToday,
+      availability,
       skill_match: skillMatch,
       score,
       reasons,

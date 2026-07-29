@@ -200,6 +200,8 @@ const api = {
   recommend: (id) => apiJSON('/api/tickets/' + id + '/recommend'),
   assign: (id, b) => apiJSON('/api/tickets/' + id + '/assign', { method: 'POST', body: JSON.stringify(b) }),
   assignToMe: (id) => apiJSON('/api/tickets/' + id + '/assign-to-me', { method: 'POST', body: JSON.stringify({}) }),
+  assignableTechs: (id) => apiJSON('/api/tickets/' + id + '/assignable-technicians'),
+  inviteCollaborator: (id, b) => apiJSON('/api/tickets/' + id + '/collaborators/invite', { method: 'POST', body: JSON.stringify(b) }),
   comment: (id, b) => apiJSON('/api/tickets/' + id + '/comments', { method: 'POST', body: JSON.stringify(b) }),
   technicians: (dept) => apiJSON('/api/technicians' + (dept ? '?department=' + dept : '')),
   schedules: (id) => apiJSON('/api/technicians/' + id + '/schedules'),
@@ -997,7 +999,9 @@ async function renderTicketDetail(id) {
   const { ticket: t, comments, activity, attachments, assignments, primaryTechnician, collaborators } = data;
   const u = state.user;
   const isDeptAdmin = u.role === 'SuperAdmin' || (u.role === 'AdminIT' && t.department === 'IT') || (u.role === 'AdminME' && t.department === 'ME');
+  // Edit rights follow the backend: only the Primary technician may edit.
   const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
+  const team = { primary: primaryTechnician, collaborators: collaborators || [] };
   const canReply = u.role !== 'Leader';
 
   // Group attachments by the comment they were posted with, so each reply's
@@ -1035,8 +1039,6 @@ async function renderTicketDetail(id) {
             ${t.source === 'public_quick_report' ? '<dt>Source</dt><dd><span class="badge src-public">Public Quick Report</span></dd>' : ''}
             <dt>${t.source === 'public_quick_report' ? 'Reporter' : 'Requester'}</dt><dd>${esc(t.public_reporter_name || t.customer_name || '—')}</dd>
             <dt>Contact</dt><dd>${esc(t.public_reporter_contact || t.contact_number || '—')}</dd>
-            <dt>Primary Technician / PIC</dt><dd>${primaryTechnician ? `${esc(primaryTechnician.technician_name)} <span class="badge badge-pic">PIC / Primary</span>` : (t.assignee_name && t.assignee_name !== 'Unassigned' ? `${esc(t.assignee_name)} <span class="badge badge-pic">PIC / Primary</span>` : '<span class="muted">Unassigned</span>')}</dd>
-            ${(collaborators && collaborators.length) ? `<dt>Collaborators</dt><dd>${collaborators.map(c => `<span class="badge badge-collab" style="margin-right:4px">${esc(c.technician_name)} · Collaborator</span>`).join('')}</dd>` : ''}
             <dt>Created</dt><dd>${fmtDate(t.created_at)}</dd>
             ${t.region ? `<dt>Region</dt><dd>${esc(t.region)}</dd>` : ''}
             ${t.scheduled_at ? `<dt>Scheduled</dt><dd>📅 ${fmtDate(t.scheduled_at)}</dd>` : ''}
@@ -1051,6 +1053,7 @@ async function renderTicketDetail(id) {
           <div class="divider"></div>
           <div class="tl-msg">${esc(t.description || '')}</div>
         </div>
+        ${assignedTeamHTML(t, team)}
         ${attachments.length ? `<div class="panel mb"><div class="panel-head"><h3>Evidence & photos</h3></div><div class="card" style="border:none"><div class="tl-atts">${attachments.map(attCard).join('')}</div></div></div>` : ''}
         <div class="panel"><div class="panel-head"><h3>Activity</h3></div><div class="card" style="border:none">
           <div class="timeline">${events.length ? events.map(tlItem).join('') : '<p class="muted">No activity yet.</p>'}</div>
@@ -1062,9 +1065,71 @@ async function renderTicketDetail(id) {
   wireNavLinks();
   if (canReply) wireReply(t);
   wireActionPane(t, isDeptAdmin, isAssignedTech);
+  wireAssignedTeam(t);
 }
-function actionText(a) { return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action); }
-function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
+
+/* --------------------------------------------------------------------------
+   Assigned Team — who owns the ticket and who is helping.
+   Primary Technician / PIC is deliberately the visually stronger row;
+   Collaborators are listed underneath. Both have explicit empty states.
+   -------------------------------------------------------------------------- */
+// A technician may invite a Collaborator when they are on the team themselves
+// (Primary or Collaborator), the ticket is in their department, and it is still
+// open. The backend re-checks all of this — this is only for showing the button.
+function canInviteCollaborator(t, team) {
+  const u = state.user;
+  if (!u.role.startsWith('Technician')) return false;
+  const myDept = u.role === 'TechnicianIT' ? 'IT' : 'ME';
+  if (t.department !== myDept) return false;
+  if (['Closed', 'Cancelled'].includes(t.status)) return false;
+  const onTeam = (team.primary && team.primary.technician_id === u.id)
+    || (team.collaborators || []).some((c) => c.technician_id === u.id)
+    || t.assigned_technician_id === u.id;
+  return !!onTeam;
+}
+function assignedTeamHTML(t, team) {
+  const primaryName = (team.primary && team.primary.technician_name)
+    || (t.assignee_name && t.assignee_name !== 'Unassigned' ? t.assignee_name : null);
+  const primaryRow = primaryName
+    ? `<div class="team-row team-primary">
+         <div class="team-avatar">${esc(techInitials(primaryName))}</div>
+         <div class="team-id"><div class="team-name">${esc(primaryName)}</div>
+           <div class="team-role">Primary Technician / PIC</div></div>
+         <span class="badge badge-pic">PIC / Primary</span>
+       </div>`
+    : `<div class="team-empty">No Primary Technician assigned yet.</div>`;
+  const collabRows = (team.collaborators || []).length
+    ? team.collaborators.map((c) => `<div class="team-row team-collab">
+         <div class="team-avatar sm">${esc(techInitials(c.technician_name))}</div>
+         <div class="team-id"><div class="team-name">${esc(c.technician_name)}</div>
+           <div class="team-role">Collaborator</div></div>
+         <span class="badge badge-collab">Collaborator</span>
+       </div>`).join('')
+    : `<div class="team-empty">No collaborators added yet.</div>`;
+  const inviteBtn = canInviteCollaborator(t, team)
+    ? `<button class="btn-outline" id="btn-invite-collab" style="padding:6px 12px">＋ Invite Collaborator</button>`
+    : '';
+  return `<div class="panel mb">
+    <div class="panel-head"><h3>Assigned Team</h3>${inviteBtn}</div>
+    <div class="card" style="border:none">
+      ${primaryRow}
+      <div class="team-sub">Collaborators</div>
+      ${collabRows}
+    </div>
+  </div>`;
+}
+function wireAssignedTeam(t) {
+  const btn = $('#btn-invite-collab');
+  if (btn) btn.addEventListener('click', () => openInviteCollaboratorModal(t, () => renderTicketDetail(t.id)));
+}
+// Assignment events are logged as complete sentences ("Admin added X as
+// Collaborator.") so they read as-is instead of being prefixed with a label.
+const SENTENCE_ACTIONS = ['ticket.assigned', 'ticket.collaborator_added', 'ticket.collaborator_invited', 'ticket.assignment_removed'];
+function actionText(a) {
+  if (a.detail && SENTENCE_ACTIONS.includes(a.action)) return a.detail;
+  return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action);
+}
+function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'ticket.collaborator_added': 'Collaborator added', 'ticket.collaborator_invited': 'Collaborator invited', 'ticket.assignment_removed': 'Assignment removed', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
 function tlItem(e) {
   const atts = (e.atts && e.atts.length) ? `<div class="tl-atts">${e.atts.map(attCard).join('')}</div>` : '';
   if (e.kind === 'sys') return `<div class="tl-item sys"><div class="tl-head"><span class="tl-author">${esc(e.author || 'System')}</span><span class="tl-time">${fmtDate(e.t)}</span></div><div class="tl-msg">${esc(e.text)}</div>${atts}</div>`;
@@ -1239,25 +1304,136 @@ async function openRerouteModal(t) {
   catch (e) { toast(e.message, 'error'); }
 }
 
+/* --------------------------------------------------------------------------
+   Invite Collaborator — technician-side flow.
+   Shows the ticket context and the current team first, so the inviter can see
+   who is already on it, then a searchable technician list with availability and
+   workload. Never changes the ticket status.
+   -------------------------------------------------------------------------- */
+const AVAIL_CLASS = {
+  'Available now': 'ok',
+  'Busy': 'warn',
+  'Off duty': 'off',
+  'No schedule today': 'off',
+};
+function candidateRowHTML(c) {
+  const already = c.is_primary ? 'Primary Technician' : c.is_collaborator ? 'Collaborator' : null;
+  const disabled = c.is_self || !!already;
+  const note = c.is_self ? 'You' : already ? 'Already ' + already : '';
+  return `<label class="cand-row ${disabled ? 'is-disabled' : ''}" data-cand="${esc(c.username.toLowerCase())}">
+    <input type="radio" name="cand" value="${c.id}" ${disabled ? 'disabled' : ''}>
+    <div class="cand-main">
+      <div class="cand-name">${esc(c.username)} ${note ? `<span class="muted">· ${esc(note)}</span>` : ''}</div>
+      <div class="cand-meta">
+        <span class="avail avail-${AVAIL_CLASS[c.availability] || 'off'}">${esc(c.availability || '—')}</span>
+        <span class="muted">${c.workload} open ticket${c.workload === 1 ? '' : 's'}</span>
+        <span class="muted">${esc(c.department || '')}</span>
+      </div>
+    </div>
+  </label>`;
+}
+async function openInviteCollaboratorModal(t, after) {
+  openModal({
+    title: 'Invite Collaborator',
+    bodyHTML: `<div id="inv-ctx" class="inv-ctx"><div class="loading-inline">Loading ticket team…</div></div>
+      <div class="field"><label>Select technician</label>
+        <input id="inv-search" type="search" placeholder="Search technician by name…" autocomplete="off">
+      </div>
+      <div id="inv-list" class="cand-list"><div class="loading-inline">Loading technicians…</div></div>
+      <div class="field mt"><label>Note / reason <span class="muted">(optional)</span></label>
+        <textarea id="inv-note" rows="2" placeholder="Why do you need help on this ticket?"></textarea>
+      </div>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-invite>Invite Collaborator</button>`,
+    size: 'lg',
+    async onMount(ov, close) {
+      $('[data-cancel]', ov).addEventListener('click', close);
+      const inviteBtn = $('[data-invite]', ov);
+      inviteBtn.disabled = true;
+      try {
+        const data = await api.assignableTechs(t.id);
+        const collabNames = data.collaborators.map((c) => c.technician_name);
+        $('#inv-ctx', ov).innerHTML = `
+          <div class="inv-ticket">${esc(data.ticket.ticket_number || '#' + t.id)}</div>
+          <dl class="info-list compact">
+            <dt>Outlet</dt><dd>${esc(data.ticket.outlet_name || data.ticket.outlet_code || '—')}</dd>
+            <dt>Category</dt><dd>${esc(data.ticket.category || '—')} · ${esc(data.ticket.department || '')}</dd>
+            <dt>Primary Technician</dt><dd>${data.primary ? esc(data.primary.technician_name) : '<span class="muted">No Primary Technician assigned yet.</span>'}</dd>
+            <dt>Collaborators</dt><dd>${collabNames.length ? collabNames.map((n) => `<span class="badge badge-collab" style="margin-right:4px">${esc(n)}</span>`).join('') : '<span class="muted">No collaborators added yet.</span>'}</dd>
+          </dl>`;
+        const list = $('#inv-list', ov);
+        const selectable = data.candidates.filter((c) => !c.is_self && !c.is_primary && !c.is_collaborator);
+        list.innerHTML = data.candidates.length
+          ? data.candidates.map(candidateRowHTML).join('')
+          : `<p class="muted">No technicians available in this department.</p>`;
+        if (!selectable.length && data.candidates.length) {
+          list.innerHTML += `<p class="muted mt">Everyone in this department is already on this ticket.</p>`;
+        }
+        inviteBtn.disabled = !selectable.length;
+        // Client-side filter over the already-loaded list.
+        $('#inv-search', ov).addEventListener('input', (e) => {
+          const q = e.target.value.trim().toLowerCase();
+          $$('.cand-row', ov).forEach((row) => {
+            row.style.display = !q || row.dataset.cand.includes(q) ? '' : 'none';
+          });
+        });
+      } catch (e) {
+        $('#inv-list', ov).innerHTML = errBox(e);
+        return;
+      }
+      inviteBtn.addEventListener('click', async () => {
+        const picked = $('input[name="cand"]:checked', ov);
+        if (!picked) { toast('Pick a technician to invite', 'error'); return; }
+        // Guard against a double-click creating two invites.
+        if (inviteBtn.disabled) return;
+        inviteBtn.disabled = true; inviteBtn.textContent = 'Inviting…';
+        try {
+          const res = await api.inviteCollaborator(t.id, {
+            technician_id: Number(picked.value),
+            note: $('#inv-note', ov).value.trim() || undefined,
+          });
+          toast(`${res.collaborator.technician_name} added as Collaborator`, 'success');
+          close();
+          if (after) after();
+        } catch (e) {
+          toast(e.message, 'error');
+          inviteBtn.disabled = false; inviteBtn.textContent = 'Invite Collaborator';
+        }
+      });
+    },
+  });
+}
+
 // Assignment modal with multi-technician support (Primary + Collaborators)
 async function openAssignModal(t, after) {
   const { overlay, close } = openModal({
     title: 'Manage Assignment — ' + (t.ticket_number || '#' + t.id),
-    bodyHTML: `<div id="cur-assign-box" class="mb"><div class="loading-inline">Loading current assignment status…</div></div>
-      <div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
-      <div class="divider"></div>
-      <div class="field"><label>Select Technician</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
-      <div class="field"><label>Assignment Role</label>
-        <select id="assign-role-type">
-          <option value="primary">Primary Technician (PIC)</option>
-          <option value="collaborator">Collaborator / Additional Agent</option>
-        </select>
+    bodyHTML: `
+      <div class="assign-sec">
+        <h4 class="assign-h">Current Assigned Team</h4>
+        <div id="cur-assign-box"><div class="loading-inline">Loading current assignment…</div></div>
       </div>
-      <label class="row gap-sm" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>`,
-    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-manual>Assign Selected</button>`,
+      <div class="assign-sec">
+        <h4 class="assign-h">Recommended Technicians</h4>
+        <div id="rec-box"><div class="loading-inline">Finding available technicians…</div></div>
+      </div>
+      <div class="assign-sec">
+        <h4 class="assign-h">Manual Assignment</h4>
+        <div class="field"><label>Select technician</label><select id="manual-tech"><option value="">Choose technician…</option></select></div>
+        <div class="row gap-sm wrap">
+          <button class="btn-primary" data-manual="primary" style="padding:8px 14px">Set as Primary</button>
+          <button class="btn-outline" data-manual="collaborator" style="padding:8px 14px">Add as Collaborator</button>
+        </div>
+        <details class="assign-adv mt">
+          <summary>Advanced options</summary>
+          <label class="row gap-sm mt" style="cursor:pointer;font-size:.82rem"><input type="checkbox" id="ov-check" style="width:auto"> Force even if wrong department / off-duty</label>
+          <div class="hint">Only use this when a ticket genuinely needs a technician from the other department.</div>
+        </details>
+      </div>`,
+    footHTML: `<button class="btn-ghost" data-cancel>Close</button>`,
     size: 'lg',
     async onMount(ov, close) {
       $('[data-cancel]', ov).addEventListener('click', close);
+      const override = () => !!($('#ov-check', ov) || {}).checked;
       try {
         const [ticketData, recs, techs] = await Promise.all([
           api.ticket(t.id),
@@ -1265,62 +1441,65 @@ async function openAssignModal(t, after) {
           api.technicians(t.department).catch(() => []),
         ]);
 
+        const primary = ticketData.primaryTechnician || null;
+        const collabs = ticketData.collaborators || [];
         const curBox = $('#cur-assign-box', ov);
-        const activeAss = ticketData.activeAssignments || [];
-        if (activeAss.length) {
-          curBox.innerHTML = `
-            <div style="font-weight:600;margin-bottom:6px;font-size:.88rem">Active Technicians:</div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px">
-              ${activeAss.map(a => `
-                <div style="background:var(--bg-muted, #1e293b);border:1px solid var(--border, #334155);padding:6px 10px;border-radius:6px;font-size:.82rem;display:flex;align-items:center;gap:6px">
-                  <span>${esc(a.technician_name)}</span>
-                  <span class="badge ${a.role_type === 'primary' ? 'badge-primary' : ''}">${a.role_type === 'primary' ? 'Primary' : 'Collaborator'}</span>
-                  <button type="button" class="btn-ghost" data-remove-tech="${a.technician_id}" style="padding:2px 6px;color:var(--danger, #ef4444);font-size:11px" title="Remove technician">✕</button>
-                </div>
-              `).join('')}
-            </div>`;
-          $$('[data-remove-tech]', ov).forEach(b => {
-            b.addEventListener('click', async () => {
-              try {
-                await api.assign(t.id, { technician_id: Number(b.dataset.removeTech), action: 'remove' });
-                toast('Technician assignment removed', 'info');
-                close();
-                if (after) after();
-              } catch (err) {
-                toast(err.message, 'error');
-              }
-            });
-          });
-        } else {
-          curBox.innerHTML = `<div class="muted" style="font-size:.84rem">No active technician assigned to this ticket.</div>`;
-        }
+        curBox.innerHTML = `
+          ${primary ? `<div class="team-row team-primary">
+              <div class="team-avatar">${esc(techInitials(primary.technician_name))}</div>
+              <div class="team-id"><div class="team-name">${esc(primary.technician_name)}</div><div class="team-role">Primary Technician / PIC</div></div>
+              <button type="button" class="btn-ghost danger-text" data-remove-tech="${primary.technician_id}" style="padding:4px 8px;font-size:.78rem">Remove</button>
+            </div>` : `<div class="team-empty">No Primary Technician assigned yet.</div>`}
+          <div class="team-sub">Collaborators</div>
+          ${collabs.length ? collabs.map((c) => `<div class="team-row team-collab">
+              <div class="team-avatar sm">${esc(techInitials(c.technician_name))}</div>
+              <div class="team-id"><div class="team-name">${esc(c.technician_name)}</div><div class="team-role">Collaborator</div></div>
+              <button type="button" class="btn-ghost" data-promote="${c.technician_id}" style="padding:4px 8px;font-size:.78rem">Change Primary</button>
+              <button type="button" class="btn-ghost danger-text" data-remove-tech="${c.technician_id}" style="padding:4px 8px;font-size:.78rem">Remove Collaborator</button>
+            </div>`).join('') : `<div class="team-empty">No collaborators added yet.</div>`}`;
 
+        $$('[data-remove-tech]', ov).forEach((b) => b.addEventListener('click', () =>
+          doAssign(t, b.dataset.removeTech, null, false, close, after, 'remove')));
+        $$('[data-promote]', ov).forEach((b) => b.addEventListener('click', () =>
+          doAssign(t, b.dataset.promote, 'primary', override(), close, after)));
+
+        const onTeam = (id) => (primary && primary.technician_id === id) || collabs.some((c) => c.technician_id === id);
         const rb = $('#rec-box', ov);
         rb.innerHTML = recs.length ? recs.map((r, i) => `
           <div class="rec-item ${i === 0 && r.available ? 'best' : ''}">
             <div class="rec-info"><div class="rec-name">${esc(r.username)} ${i === 0 && r.available ? '⭐' : ''}</div><div class="rec-reasons">${esc(r.reasons.join(' · '))}</div></div>
-            <span class="rec-avail ${r.available ? 'yes' : 'no'}">${r.available ? 'available' : 'busy'}</span>
-            <button class="btn-primary" data-rec="${r.id}" style="padding:7px 12px">Assign Primary</button>
+            <span class="rec-avail ${r.available ? 'yes' : 'no'}">${esc(r.availability || (r.available ? 'Available now' : 'Busy'))}</span>
+            ${onTeam(r.id)
+              ? `<span class="muted" style="font-size:.78rem">${primary && primary.technician_id === r.id ? 'Primary' : 'Collaborator'}</span>`
+              : `<button class="btn-primary" data-rec-primary="${r.id}" style="padding:7px 12px">${primary ? 'Change Primary' : 'Set as Primary'}</button>
+                 <button class="btn-outline" data-rec-collab="${r.id}" style="padding:7px 12px">Add as Collaborator</button>`}
           </div>`).join('') : '<p class="muted">No technicians configured for this department.</p>';
 
-        $('#manual-tech', ov).innerHTML = '<option value="">Choose technician…</option>' + techs.map((x) => `<option value="${x.id}">${esc(x.username)} (${x.workload} open)</option>`).join('');
-        $$('[data-rec]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.rec, 'primary', false, close, after)));
+        $('#manual-tech', ov).innerHTML = '<option value="">Choose technician…</option>' +
+          techs.map((x) => `<option value="${x.id}">${esc(x.username)} (${x.workload} open)${onTeam(x.id) ? ' — already assigned' : ''}</option>`).join('');
+        $$('[data-rec-primary]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.recPrimary, 'primary', override(), close, after)));
+        $$('[data-rec-collab]', ov).forEach((b) => b.addEventListener('click', () => doAssign(t, b.dataset.recCollab, 'collaborator', override(), close, after)));
       } catch (e) { $('#rec-box', ov).innerHTML = errBox(e); }
 
-      $('[data-manual]', ov).addEventListener('click', () => {
-        const id = $('#manual-tech', ov).value; if (!id) { toast('Pick a technician', 'error'); return; }
-        const roleType = $('#assign-role-type', ov).value;
-        doAssign(t, id, roleType, $('#ov-check', ov).checked, close, after);
-      });
+      $$('[data-manual]', ov).forEach((b) => b.addEventListener('click', () => {
+        const id = $('#manual-tech', ov).value;
+        if (!id) { toast('Pick a technician', 'error'); return; }
+        doAssign(t, id, b.dataset.manual, override(), close, after);
+      }));
     },
   });
 }
-async function doAssign(t, techId, roleType, override, close, after) {
+async function doAssign(t, techId, roleType, override, close, after, action) {
+  const body = { technician_id: Number(techId), override };
+  if (action) body.action = action;
+  else body.role_type = roleType || 'primary';
   try {
-    await api.assign(t.id, { technician_id: Number(techId), role_type: roleType || 'primary', override });
-    toast('Technician assignment updated', 'success'); close(); if (after) after();
+    await api.assign(t.id, body);
+    toast(action === 'remove' ? 'Technician removed from the team' : 'Technician assignment updated',
+      action === 'remove' ? 'info' : 'success');
+    close(); if (after) after();
   } catch (e) {
-    if (/override/i.test(e.message)) toast(e.message + ' Tick the override box to force.', 'error');
+    if (/override/i.test(e.message)) toast(e.message + ' Tick “Advanced options → Force” to override.', 'error');
     else toast(e.message, 'error');
   }
 }

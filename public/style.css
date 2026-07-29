@@ -336,6 +336,45 @@ textarea { resize: vertical; min-height: 90px; }
 .rec-avail.yes { background: rgba(16,185,129,.18); color: #34d399; }
 .rec-avail.no { background: rgba(239,68,68,.16); color: #f87171; }
 
+/* --- Assigned Team (Primary Technician / PIC + Collaborators) --- */
+.team-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; background: var(--surface-2); }
+/* Primary is deliberately the stronger row: accent border + tinted background. */
+.team-row.team-primary { border-color: var(--primary); background: rgba(59,130,246,.08); padding: 12px; }
+.team-row.team-collab { background: transparent; border-style: dashed; }
+.team-avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 0.78rem; font-weight: 700; background: var(--primary); color: #fff; flex: none; }
+.team-avatar.sm { width: 28px; height: 28px; font-size: 0.7rem; background: rgba(148,163,184,.25); color: var(--text-muted); }
+.team-id { flex: 1; min-width: 0; }
+.team-name { font-weight: 600; font-size: 0.9rem; }
+.team-row.team-primary .team-name { font-size: 0.96rem; }
+.team-role { font-size: 0.72rem; color: var(--text-muted); }
+.team-sub { font-size: 0.74rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); margin: 14px 0 8px; }
+.team-empty { font-size: 0.82rem; color: var(--text-muted); padding: 10px 12px; border: 1px dashed var(--border); border-radius: 10px; margin-bottom: 8px; }
+.danger-text { color: var(--danger); }
+
+/* --- Invite Collaborator modal --- */
+.inv-ctx { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 14px; background: var(--surface-2); }
+.inv-ticket { font-weight: 700; font-size: 0.88rem; margin-bottom: 8px; }
+.info-list.compact { font-size: 0.82rem; gap: 6px 12px; }
+.cand-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+.cand-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.cand-row:last-child { border-bottom: none; }
+.cand-row:hover:not(.is-disabled) { background: var(--surface-2); }
+.cand-row.is-disabled { opacity: .55; cursor: not-allowed; }
+.cand-row input[type="radio"] { width: auto; flex: none; margin: 0; }
+.cand-main { flex: 1; min-width: 0; }
+.cand-name { font-weight: 600; font-size: 0.87rem; }
+.cand-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 0.72rem; margin-top: 2px; }
+.avail { font-weight: 700; padding: 1px 6px; border-radius: 5px; }
+.avail-ok { background: rgba(16,185,129,.18); color: #34d399; }
+.avail-warn { background: rgba(245,158,11,.18); color: #fbbf24; }
+.avail-off { background: rgba(148,163,184,.18); color: #94a3b8; }
+
+/* --- Manage Assignment modal sections --- */
+.assign-sec { margin-bottom: 18px; }
+.assign-h { font-size: 0.78rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px; }
+.assign-adv summary { font-size: 0.82rem; cursor: pointer; color: var(--text-muted); }
+.assign-adv[open] summary { color: var(--text); }
+
 /* --- Segmented (dept picker, urgency) --- */
 .segmented { display: grid; grid-auto-flow: column; gap: 8px; }
 .seg-btn { padding: 12px; border: 1px solid var(--border); background: var(--surface-2); border-radius: 10px; color: var(--text-2); font-weight: 600; font-size: 0.9rem; }

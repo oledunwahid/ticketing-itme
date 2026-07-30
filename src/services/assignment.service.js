@@ -21,8 +21,7 @@
 const db = require("../../database");
 const { logActivity } = require("./auditLog.service");
 const { isAdmin, isTechnician, deptForRole } = require("../utils/permissions");
-
-const TERMINAL_STATUSES = ["Closed", "Cancelled"];
+const { TERMINAL_STATUSES } = require("../config/constants");
 
 // How an actor is named in the activity log: admins are institutional
 // ("Admin assigned …"), technicians speak for themselves ("T TechIT invited …").
@@ -61,6 +60,22 @@ async function getTeam(ticketId) {
 async function isTeamMember(ticketId, userId) {
   const { active } = await getTeam(ticketId);
   return active.some((a) => a.technician_id === userId);
+}
+
+/**
+ * This user's role on the ticket's team: "primary" | "collaborator" | null.
+ *
+ * `ticket.assigned_technician_id` is accepted as a fallback for legacy tickets
+ * that were assigned before ticket_assignments rows existed — otherwise a
+ * long-standing PIC would read as "not on the team".
+ */
+async function teamRoleOf(ticket, userId) {
+  const { primary, collaborators } = await getTeam(ticket.id);
+  if (primary && primary.technician_id === userId) return "primary";
+  if (collaborators.some((c) => c.technician_id === userId))
+    return "collaborator";
+  if (ticket.assigned_technician_id === userId) return "primary";
+  return null;
 }
 
 // --- Validation ------------------------------------------------------------
@@ -225,6 +240,7 @@ module.exports = {
   getActiveAssignments,
   getTeam,
   isTeamMember,
+  teamRoleOf,
   loadAssignableTechnician,
   setPrimary,
   addCollaborator,

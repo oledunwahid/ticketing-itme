@@ -172,7 +172,9 @@ textarea { resize: vertical; min-height: 90px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .panel-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.panel-head h3 { font-size: 0.98rem; font-weight: 700; }
+.panel-head h3 { font-size: 0.98rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+/* Panel-title icons sit quieter than the text they label. */
+.panel-head h3 svg { flex: none; color: var(--text-muted); }
 
 /* --- Stat grid --- */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
@@ -269,7 +271,32 @@ textarea { resize: vertical; min-height: 90px; }
    from Collaborators. PIC = solid indigo, Collaborator = muted outline. */
 .badge-primary, .badge-pic { background: var(--primary); color: #fff; }
 .badge-collab { background: rgba(148,163,184,.18); color: #94a3b8; border: 1px solid var(--border); }
+/* Ticket detail layout.
+   Desktop: information/description/evidence/activity on the left, and a side
+   pane on the right holding the two things people came to act on — the status
+   control and the Assigned Team (with Invite Collaborator / Manage Assignment
+   inside it). Both panes start at the top, so neither creates dead scroll.
+   Mobile: one column, and the side pane is ordered ABOVE the main column so a
+   technician can update a status without scrolling past the description. The
+   resulting reading order is exactly the field priority:
+     title/summary → status action → assigned team → details → evidence → activity
+   The DOM keeps main-then-side so desktop tab order matches the visual layout. */
 .detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+/* Sticky so the status action stays reachable while reading a long activity log.
+   Bounded + scrollable: a tall pane (many collaborators) must never end up with
+   its bottom stuck off-screen. */
+.detail-side { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 76px; max-height: calc(100dvh - 92px); overflow-y: auto; }
+/* Side panels are the compact, action-first variant of .panel. */
+.side-panel .card { padding: 14px; }
+.side-panel .field { margin-bottom: 10px; }
+.side-panel .field:last-of-type { margin-bottom: 12px; }
+/* Current status, stated once and clearly. */
+.status-now { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.status-now > svg { flex: none; color: var(--text-muted); }
+.status-when { display: inline-flex; align-items: center; gap: 4px; font-size: 0.74rem; color: var(--text-muted); }
+/* The one-line reason a viewer cannot act (not assigned, wrong dept, closed…). */
+.status-note { display: flex; align-items: flex-start; gap: 7px; font-size: 0.8rem; color: var(--text-muted); line-height: 1.45; }
+.status-note svg { flex: none; margin-top: 2px; }
 .info-list { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 0.86rem; }
 .info-list dt { color: var(--text-muted); }
 .info-list dd { word-break: break-word; }
@@ -348,7 +375,18 @@ textarea { resize: vertical; min-height: 90px; }
 .team-row.team-primary .team-name { font-size: 0.96rem; }
 .team-role { font-size: 0.72rem; color: var(--text-muted); }
 .team-sub { font-size: 0.74rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); margin: 14px 0 8px; }
-.team-empty { font-size: 0.82rem; color: var(--text-muted); padding: 10px 12px; border: 1px dashed var(--border); border-radius: 10px; margin-bottom: 8px; }
+.team-empty { display: flex; align-items: center; gap: 7px; font-size: 0.82rem; color: var(--text-muted); padding: 10px 12px; border: 1px dashed var(--border); border-radius: 10px; margin-bottom: 8px; }
+.team-empty svg { flex: none; }
+/* Role badges carry an icon instead of a second word — Star = PIC, UserPlus =
+   Collaborator — so the rows stay scannable on a narrow phone. */
+.badge-pic, .badge-collab { display: inline-flex; align-items: center; gap: 4px; }
+.badge-collab { padding: 4px 6px; }
+.team-you { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--primary); background: var(--primary-soft); border-radius: 5px; padding: 1px 5px; margin-left: 6px; vertical-align: middle; }
+.team-count { font-size: 0.72rem; font-weight: 700; color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; min-width: 22px; text-align: center; padding: 1px 7px; }
+/* Invite Collaborator / Manage Assignment — present, but quieter than the
+   status action above them. */
+.team-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.team-actions .btn-outline { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 12px; font-size: 0.84rem; }
 .danger-text { color: var(--danger); }
 
 /* --- Invite Collaborator modal --- */
@@ -387,6 +425,46 @@ table.data { width: 100%; border-collapse: collapse; min-width: 560px; }
 table.data th { text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
 table.data td { padding: 11px 12px; border-bottom: 1px solid var(--border); font-size: 0.86rem; }
 table.data tr:hover td { background: var(--surface-2); }
+
+/* --- Row actions (icon-only) ----------------------------------------------
+   One style for every table's action column: icons on a single line, right
+   aligned, never wrapping and never showing text. Built by iconBtn() /
+   actionCell() in app.js — see the note there. */
+.row-actions { width: 1%; white-space: nowrap; text-align: right; }
+.act-group { display: inline-flex; align-items: center; gap: 4px; justify-content: flex-end; }
+.act-btn {
+  background: transparent; border: 1px solid transparent; color: var(--text-2);
+  width: 34px; height: 34px; border-radius: 8px; flex: none;
+  display: inline-grid; place-items: center; padding: 0;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.act-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.act-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.act-btn:active { transform: scale(0.94); }
+/* Destructive actions read as destructive on hover, not at rest — a row of red
+   icons would make every table look alarming. */
+.act-btn.act-danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+.act-btn:disabled { opacity: .35; cursor: not-allowed; }
+.act-btn:disabled:hover { background: transparent; border-color: transparent; color: var(--text-2); }
+/* Row-action groups inside cards/modals (assignment team rows) sit at the end. */
+.team-row .act-group { margin-left: auto; }
+
+/* --- Toggle switch (Active / Inactive in edit forms) ---------------------- */
+.toggle-row { display: flex; align-items: center; gap: 12px; }
+.switch { position: relative; flex: none; display: inline-flex; cursor: pointer; }
+.switch input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; cursor: pointer; }
+.switch-track {
+  width: 44px; height: 26px; border-radius: 999px; background: var(--surface-2);
+  border: 1px solid var(--border); display: flex; align-items: center; padding: 2px;
+  transition: background .16s, border-color .16s;
+}
+.switch-knob { width: 20px; height: 20px; border-radius: 50%; background: var(--text-muted); transition: transform .16s, background .16s; }
+.switch input:checked + .switch-track { background: var(--primary); border-color: var(--primary); }
+.switch input:checked + .switch-track .switch-knob { transform: translateX(18px); background: #fff; }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--primary); outline-offset: 2px; }
+.toggle-copy { min-width: 0; }
+.toggle-name { font-size: 0.9rem; font-weight: 600; color: var(--text); margin: 0; cursor: pointer; }
+.toggle-state { font-size: 0.76rem; color: var(--text-muted); }
 
 /* --- Modal --- */
 .modal-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55); display: flex; align-items: flex-end; justify-content: center; padding: 0; }
@@ -433,6 +511,9 @@ table.data tr:hover td { background: var(--surface-2); }
 @media (max-width: 960px) {
   .detail-grid { grid-template-columns: 1fr; }
   .grid-2 { grid-template-columns: 1fr; }
+  /* Status + Assigned Team move above the ticket details, so the action a
+     technician opened the page for is the first thing under the title. */
+  .detail-side { order: -1; position: static; max-height: none; overflow: visible; }
 }
 @media (max-width: 720px) {
   .sidebar {
@@ -456,6 +537,15 @@ table.data tr:hover td { background: var(--surface-2); }
   .bn-item svg { width: 21px; height: 21px; }
   .bn-item.active { color: var(--primary); }
   .toolbar select, .toolbar .search { min-width: 0; flex: 1 1 140px; }
+  /* Thumb-sized status action: this is the control technicians use in the field. */
+  .side-panel #act-status, .side-panel #act-apply { padding: 14px; font-size: 1rem; }
+  /* Row actions stay icon-only and on one line; the target grows to 40px so it
+     is comfortably tappable. The action cell never wraps, and .table-wrap
+     already scrolls horizontally, so icons cannot overflow the table. */
+  .act-btn { width: 40px; height: 40px; }
+  .act-group { gap: 2px; }
+  table.data td { padding: 9px 10px; }
+  .row-actions { padding-right: 8px !important; }
   .stat .n { font-size: 1.5rem; }
   .page-title { font-size: 1.02rem; }
 }
@@ -548,7 +638,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: non
 .sched-dept-ME .sched-block { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.40); }
 .sched-time { white-space: nowrap; }
 .sched-off-cell { text-align: center; font-size: 0.72rem; color: var(--text-muted); padding: 8px 0; opacity: 0.65; }
-.sched-del { background: transparent; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.72rem; line-height: 1; padding: 2px 3px; border-radius: 5px; flex: none; transition: background 0.12s, color 0.12s; }
+/* Compact icon delete for the dense week grid — a full .act-btn would not fit
+   in a day cell, so this keeps its own size while using the same trash icon. */
+.sched-del { background: transparent; border: none; color: var(--text-muted); cursor: pointer; line-height: 0; padding: 3px; border-radius: 5px; flex: none; transition: background 0.12s, color 0.12s; }
 .sched-del:hover { color: #fff; background: var(--danger); }
 
 .sched-emptyhint { margin-top: 12px; font-size: 0.8rem; color: var(--text-muted); background: var(--bg-2); border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }

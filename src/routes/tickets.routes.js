@@ -24,11 +24,14 @@ const {
   deptForRole,
   adminScopeForTicket,
   canClose,
+  technicianDeptMatches,
 } = require("../utils/permissions");
 const { getVisibleTicket } = require("../services/tickets.service");
 const {
   TERMINAL_STATUSES,
+  actorLabel,
   getTeam,
+  teamRoleOf,
   loadAssignableTechnician,
   setPrimary,
   addCollaborator,
@@ -44,6 +47,8 @@ const {
   SLA_TARGET_MINUTES,
   STATUS_GROUPS,
   statusesInGroup,
+  TECHNICIAN_STATUSES,
+  WAITING_STATUSES,
 } = require("../config/constants");
 const {
   recommendTechnicians,
@@ -481,6 +486,36 @@ router.post("/api/tickets/:id/comments", requireAuth, async (req, res) => {
   }
 });
 
+/* Activity-log wording for a status change. Plain language, in one sentence, so
+   the timeline reads without decoding:
+     "T TechIT changed status from Open to On Progress."
+     "T TechIT marked ticket as Waiting Sparepart. Note: waiting thermal head."
+     "T TechIT marked ticket as Resolved."
+   Statuses that describe a *state of the work* read better as "marked ticket
+   as X"; ordinary moves along the flow read better as "from A to B". */
+const MARKED_AS_STATUSES = [
+  ...WAITING_STATUSES,
+  "On Scheduled",
+  "Escalated",
+  "Resolved",
+  "Cancelled",
+];
+function statusChangeDetail(user, from, to, body = {}) {
+  const who = actorLabel(user);
+  const note = (
+    body.status_note ||
+    (to === "Waiting Sparepart" && body.sparepart_note) ||
+    (to === "Waiting Vendor" && body.vendor_note) ||
+    ""
+  )
+    .toString()
+    .trim();
+  const sentence = MARKED_AS_STATUSES.includes(to)
+    ? `${who} marked ticket as ${to}.`
+    : `${who} changed status from ${from} to ${to}.`;
+  return note ? `${sentence} Note: ${note}` : sentence;
+}
+
 router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
   try {
     const ticket = await getVisibleTicket(req.user, req.params.id);
@@ -491,12 +526,25 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
 
     const b = req.body || {};
     const isDeptAdmin = adminScopeForTicket(req.user, ticket);
-    const isAssignedTech =
-      isTechnician(req.user) && ticket.assigned_technician_id === req.user.id;
-    if (!isDeptAdmin && !isAssignedTech) {
-      return res
-        .status(403)
-        .json({ error: "You do not have permission to edit this ticket" });
+
+    /* Technician edit rights — a technician may act on a ticket when they are
+       on its assignment team, in EITHER role:
+         • Primary Technician / PIC  — owns the job
+         • Collaborator              — helping on the job, and often the one who
+                                       actually sees the field condition
+       …and the ticket is in their own department (Technician IT can never touch
+       an ME ticket and vice versa). An unassigned technician gets nothing. */
+    const teamRole = isTechnician(req.user)
+      ? await teamRoleOf(ticket, req.user.id)
+      : null;
+    const isTeamTech =
+      !!teamRole && technicianDeptMatches(req.user, ticket);
+    if (!isDeptAdmin && !isTeamTech) {
+      return res.status(403).json({
+        error: isTechnician(req.user)
+          ? "You are not assigned to this ticket."
+          : "You do not have permission to edit this ticket",
+      });
     }
 
     const updates = [];
@@ -509,36 +557,36 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
 
     // Status change (with guards + timestamps)
     if (b.status && b.status !== ticket.status) {
-      // Technicians limited to a safe subset: the core daily flow (minus New,
-      // which only the system sets) plus the operational states they own.
-      // "Closed" stays additionally gated by canClose() below.
-      const techAllowed = [
-        "Open",
-        "On Progress",
-        "Closed",
-        "On Scheduled",
-        "Waiting Sparepart",
-        "Waiting Vendor",
-        "Pending Outlet Response",
-        "Escalated",
-        "Resolved",
-      ];
-      if (isAssignedTech && !isDeptAdmin && !techAllowed.includes(b.status)) {
+      // A technician on the team owns the whole operational middle of the flow
+      // (TECHNICIAN_STATUSES) — not just the 4 core statuses. What stays out of
+      // their hands: "New" (system-set), "Cancelled" (admin + reason) and
+      // reopening a Closed/Cancelled ticket (admin + reason).
+      if (isTeamTech && !isDeptAdmin) {
+        if (TERMINAL_STATUSES.includes(ticket.status)) {
+          return res.status(403).json({
+            error: `This ticket is already ${ticket.status === "Closed" ? "closed" : "cancelled"}.`,
+          });
+        }
+        if (!TECHNICIAN_STATUSES.includes(b.status)) {
+          return res
+            .status(403)
+            .json({ error: "Technicians cannot set that status" });
+        }
+      }
+      if (b.status === "Closed" && !canClose(req.user, ticket, { isTeamMember: isTeamTech })) {
         return res
           .status(403)
-          .json({ error: "Technicians cannot set that status" });
+          .json({ error: "You are not allowed to close this ticket" });
       }
-      if (b.status === "Closed" && !canClose(req.user, ticket)) {
-        return res
-          .status(403)
-          .json({ error: "Only an admin can close a ticket" });
-      }
-      const err = validateTransition(ticket, b.status, b, req.user);
+      const err = validateTransition(ticket, b.status, b, req.user, {
+        isTeamMember: isTeamTech,
+      });
       if (err) return res.status(400).json({ error: err });
 
       set("status", b.status);
       const nowIso = new Date().toISOString();
       // On Scheduled: record the planned schedule date/time if supplied.
+      // No schedule supplied is fine — it must never block the status update.
       if (b.status === "On Scheduled" && b.scheduled_at)
         set("scheduled_at", b.scheduled_at);
       if (b.status === "On Progress" && !ticket.started_at)
@@ -548,7 +596,12 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
       if (b.status === "Closed" && !ticket.closed_at) set("closed_at", nowIso);
       if (ticket.status === "Closed" && b.status !== "Closed")
         set("closed_at", null);
-      activities.push(["status.changed", `${ticket.status} → ${b.status}`]);
+      // Nothing in this block touches assigned_technician_id / assignee_name or
+      // any ticket_assignments row: a status change never moves the team.
+      activities.push([
+        "status.changed",
+        statusChangeDetail(req.user, ticket.status, b.status, b),
+      ]);
     }
 
     if (

@@ -278,6 +278,32 @@ router.delete(
       return res
         .status(403)
         .json({ error: "Forbidden. You cannot delete this user." });
+
+    // In use → refuse, and point at the Active toggle. A deleted user would
+    // strand the tickets they reported or are assigned to, and their name would
+    // vanish from the activity log and every performance report.
+    const owner = await db.pGet(
+      `SELECT
+         (SELECT COUNT(*) FROM tickets WHERE assigned_technician_id = ?) AS assigned,
+         (SELECT COUNT(*) FROM tickets WHERE requestor_user_id = ?)      AS reported`,
+      [userId, userId],
+    );
+    const refs = (owner.assigned || 0) + (owner.reported || 0);
+    if (refs > 0) {
+      const parts = [];
+      if (owner.assigned) parts.push(`${owner.assigned} assigned ticket(s)`);
+      if (owner.reported) parts.push(`${owner.reported} reported ticket(s)`);
+      const who = await db.pGet("SELECT username FROM users WHERE id = ?", [userId]);
+      return res.status(409).json({
+        error:
+          `${who ? who.username : "This user"} has ${parts.join(" and ")} and cannot be ` +
+          `deleted. Switch Active off in Edit instead — the account can no longer sign in ` +
+          `but its ticket history stays intact.`,
+        in_use: true,
+        used_by: refs,
+      });
+    }
+
     const r = await db.pRun("DELETE FROM users WHERE id = ?", [userId]);
     if (r.changes === 0)
       return res.status(404).json({ error: "User not found" });

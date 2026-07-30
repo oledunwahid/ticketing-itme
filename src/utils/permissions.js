@@ -61,15 +61,29 @@ function adminScopeForTicket(u, ticket) {
   if (u.role === "AdminME") return ticket.department === "ME";
   return false;
 }
-function canClose(u, ticket) {
+// Can this user close this ticket?
+// Admins always may. A technician may when they are on the ticket's team —
+// Primary/PIC or Collaborator — because they are the ones who saw the work
+// finish. Pass `opts.isTeamMember` (computed via assignment.service.teamRoleOf)
+// since this module must not depend on the assignment service.
+// The transition rules still require the ticket to have passed On Progress and
+// to carry a resolution note, so "closed by technician" is never a shortcut.
+// `can_close_override` remains an independent grant for a technician who is the
+// PIC on the ticket row but has no assignment row.
+function canClose(u, ticket, opts = {}) {
   if (adminScopeForTicket(u, ticket)) return true;
-  if (
-    isTechnician(u) &&
-    u.can_close_override &&
-    ticket.assigned_technician_id === u.id
-  )
+  if (!isTechnician(u)) return false;
+  if (deptForRole(u.role) !== ticket.department) return false;
+  if (opts.isTeamMember) return true;
+  if (u.can_close_override && ticket.assigned_technician_id === u.id)
     return true;
   return false;
+}
+
+// Is this technician's department the ticket's department? Requestors/leaders
+// have no department of their own, so this is only meaningful for technicians.
+function technicianDeptMatches(u, ticket) {
+  return deptForRole(u.role) === ticket.department;
 }
 
 // Load a user's brand/outlet access sets (cached per-request via req).
@@ -133,11 +147,18 @@ async function buildTicketScope(user, opts = {}) {
     const picIn = picOutlets.length
       ? `outlet_code IN (${picOutlets.map(() => "?").join(",")})`
       : "0"; // no PIC outlets configured → PIC clause matches nothing
-    const mine = "assigned_technician_id = ?";
+    // "Mine" = the tickets I actually work on: the ones I am PIC of *and* the
+    // ones I was invited onto as a Collaborator. Without the second half a
+    // collaborator could not open — let alone update — a ticket they are on.
+    const mine = `(assigned_technician_id = ? OR EXISTS (
+        SELECT 1 FROM ticket_assignments ta
+         WHERE ta.ticket_id = tickets.id AND ta.technician_id = ?
+           AND (ta.active = 1 OR ta.is_active = 1)))`;
+    const mineParams = [user.id, user.id];
 
     if (filter === "mine") {
       clauses.push(mine);
-      params.push(user.id);
+      params.push(...mineParams);
     } else if (filter === "unassigned_pic") {
       clauses.push(`(${picIn}) AND assigned_technician_id IS NULL`);
       if (picOutlets.length) params.push(...picOutlets);
@@ -147,14 +168,14 @@ async function buildTicketScope(user, opts = {}) {
       if (!allOutlets) {
         clauses.push(`((${picIn}) OR ${mine})`);
         if (picOutlets.length) params.push(...picOutlets);
-        params.push(user.id);
+        params.push(...mineParams);
       }
     } else {
       // 'pic' (default): PIC outlets OR tickets assigned to me (so a tech never
       // loses sight of their own jobs even outside their PIC coverage).
       clauses.push(`((${picIn}) OR ${mine})`);
       if (picOutlets.length) params.push(...picOutlets);
-      params.push(user.id);
+      params.push(...mineParams);
     }
   } else if (user.role === "AdminIT" || user.role === "AdminME") {
     clauses.push("department = ?");
@@ -192,6 +213,7 @@ module.exports = {
   isTechnician,
   adminScopeForTicket,
   canClose,
+  technicianDeptMatches,
   getUserScope,
   getTechnicianScope,
   buildTicketScope,

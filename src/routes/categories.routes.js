@@ -162,6 +162,30 @@ router.delete(
       const id = parseInt(req.params.id, 10);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid category ID" });
 
+      const cat = await db.pGet(
+        "SELECT id, name, department_code FROM categories WHERE id = ?",
+        [id],
+      );
+      if (!cat) return res.status(404).json({ error: "Category not found" });
+
+      // In use → refuse, and point at the Active toggle. Deleting would leave
+      // existing tickets pointing at a category that no longer exists, which
+      // breaks their history and every report that groups by category.
+      const used = await db.pGet(
+        "SELECT COUNT(*) c FROM tickets WHERE department = ? AND category = ?",
+        [cat.department_code, cat.name],
+      );
+      if (used && used.c > 0) {
+        return res.status(409).json({
+          error:
+            `"${cat.name}" is used by ${used.c} ticket(s) and cannot be deleted. ` +
+            `Switch Active off in Edit instead — it stays on existing tickets and ` +
+            `reports but disappears from new ticket forms.`,
+          in_use: true,
+          used_by: used.c,
+        });
+      }
+
       const r = await db.pRun("DELETE FROM categories WHERE id = ?", [id]);
       if (r.changes === 0) return res.status(404).json({ error: "Category not found" });
       res.json({ success: true });

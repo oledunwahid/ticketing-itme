@@ -48,6 +48,42 @@ const STATUSES = [
 ];
 
 /* --------------------------------------------------------------------------
+   TECHNICIAN_STATUSES — what an assigned technician (Primary/PIC OR
+   Collaborator) may set themselves.
+
+   Technicians are on site and usually know the real field condition before
+   admin does, so they own the whole operational middle of the flow, not just
+   the 4 core statuses. Two statuses are deliberately NOT here:
+     • "New"       — system-set only, never chosen by hand
+     • "Cancelled" — admin-only, and requires a reason
+   Reopening a Closed/Cancelled ticket also stays admin-only (also with a
+   reason). Everything else is still subject to the transition rules in
+   utils/statusTransition (e.g. New/Open → Closed remains blocked).
+   -------------------------------------------------------------------------- */
+const TECHNICIAN_STATUSES = [
+  "Open",
+  "On Progress",
+  "On Scheduled",
+  "Waiting Sparepart",
+  "Waiting Vendor",
+  "Pending Outlet Response",
+  "Escalated",
+  "Resolved",
+  "Closed",
+];
+
+// Statuses that mean "work is parked, waiting on someone else". A short note
+// explaining what is being waited for is expected (soft-required) on these.
+const WAITING_STATUSES = [
+  "Waiting Sparepart",
+  "Waiting Vendor",
+  "Pending Outlet Response",
+];
+
+// Terminal states: no further work happens unless an admin reopens.
+const TERMINAL_STATUSES = ["Closed", "Cancelled"];
+
+/* --------------------------------------------------------------------------
    Status grouping — for dashboard cards and summary reporting ONLY.
    Grouping never rewrites a ticket's stored status; it is a read-side rollup.
    -------------------------------------------------------------------------- */
@@ -90,6 +126,9 @@ module.exports = {
   ALL_STATUSES,
   CORE_STATUSES,
   EXTENDED_STATUSES,
+  TECHNICIAN_STATUSES,
+  WAITING_STATUSES,
+  TERMINAL_STATUSES,
   STATUS_GROUPS,
   STATUS_GROUP_OF,
   statusGroup,

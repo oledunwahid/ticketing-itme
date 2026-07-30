@@ -49,9 +49,15 @@ function canTransition(current, next) {
 }
 const URGENCIES = ['Low', 'Medium', 'High', 'Critical'];
 const REGIONS = ['Jakarta', 'Surabaya'];
-// Statuses a technician may set (mirrors the server-side techAllowed list).
+// Statuses an assigned technician may set (mirrors TECHNICIAN_STATUSES in
+// src/config/constants.js). Technicians own the operational middle of the flow
+// because they see the field condition first; "New" is system-set and
+// "Cancelled" — like reopening — stays admin-only and needs a reason.
 const TECH_STATUSES = ['Open', 'On Progress', 'Closed', 'On Scheduled', 'Waiting Sparepart',
   'Waiting Vendor', 'Pending Outlet Response', 'Escalated', 'Resolved'];
+// Work is parked waiting on someone else — a short note is expected.
+const WAITING_STATUSES = ['Waiting Sparepart', 'Waiting Vendor', 'Pending Outlet Response'];
+const TERMINAL_STATUSES = ['Closed', 'Cancelled'];
 const ADMIN_ROLES = ['SuperAdmin', 'AdminIT', 'AdminME'];
 const CAN_CREATE = ['Requestor', 'SuperAdmin', 'AdminIT', 'AdminME'];
 
@@ -84,7 +90,49 @@ const ICONS = {
   tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
   mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
   swap: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  // Ticket-detail status & team icons (Lucide paths, drawn by svg() with the
+  // same 24×24 / stroke settings as the nav icons — no extra dependency).
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  checkCircle: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+  checkCircle2: '<circle cx="12" cy="12" r="10"/><polyline points="16 10 11 15 8 12"/>',
+  star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  userPlus: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>',
+  alertTriangle: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><line x1="12" y1="22" x2="12" y2="12"/>',
+  truck: '<path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h3"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+  calendarClock: '<path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><circle cx="17.5" cy="17.5" r="4.5"/><path d="M17.5 15.8v1.9l1.4.9"/>',
+  messageCircle: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  slash: '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
+  // Table row actions (Lucide paths) — see iconBtn()/actionCell() below.
+  pencil: '<path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/><path d="m15 5 4 4"/>',
+  trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
+  eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+  moreHorizontal: '<circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="12" r="1.5"/>',
+  printer: '<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
 };
+
+/* Icon per status — one glance should say what state the ticket is in.
+   Falls back to the generic activity icon for anything unmapped. */
+const STATUS_ICON = {
+  'New': 'inbox',
+  'Open': 'inbox',
+  'Assigned': 'users',
+  'On Scheduled': 'calendarClock',
+  'On Progress': 'activity',
+  'Waiting Sparepart': 'package',
+  'Waiting Vendor': 'truck',
+  'Pending Outlet Response': 'messageCircle',
+  'Escalated': 'alertTriangle',
+  'Resolved': 'checkCircle',
+  'Closed': 'checkCircle2',
+  'Cancelled': 'slash',
+};
+const statusIcon = (s, size = 15) => svg(ICONS[STATUS_ICON[s]] || ICONS.activity, size);
 
 // ---- State ----
 const state = {
@@ -131,6 +179,35 @@ function agingClass(t) {
 function fmtBytes(b) { if (!b) return '0 B'; const k = 1024, s = ['B', 'KB', 'MB', 'GB']; const i = Math.floor(Math.log(b) / Math.log(k)); return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i]; }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function svg(paths, size = 20) { return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`; }
+
+/* --------------------------------------------------------------------------
+   Row actions — ONE component for every table's action column, so they cannot
+   drift into a mix of "Edit" / "Del" / "Deactivate" text buttons again.
+
+   iconBtn({ icon, label, attrs, danger, disabled, title })
+     • icon-only: the label is the tooltip (title) AND the accessible name
+       (aria-label), never visible text
+     • `attrs` carries the data-* hook the view binds its click handler to
+     • `disabled` + a title explaining WHY is preferred over hiding an action
+       the user can see is missing (requirement: dangerous → disabled+tooltip)
+   Permissions: these helpers only shape the UI. Every action they trigger is
+   re-authorised by the backend route.
+   -------------------------------------------------------------------------- */
+function iconBtn({ icon, label, attrs = '', danger = false, disabled = false, title = '' }) {
+  const tip = title || label;
+  return `<button type="button" class="act-btn${danger ? ' act-danger' : ''}"${disabled ? ' disabled' : ''}`
+    + ` ${attrs} title="${esc(tip)}" aria-label="${esc(label)}">${svg(ICONS[icon], 16)}</button>`;
+}
+// Action <td> for a table row. Falsy entries are dropped, so a caller can pass
+// `cond && iconBtn(...)` to omit an action the user may not perform.
+function actionCell(...buttons) {
+  const btns = buttons.filter(Boolean);
+  return `<td class="row-actions"><div class="act-group">${btns.join('')}</div></td>`;
+}
+// Same buttons outside a table (modal lists, cards).
+function actionGroup(...buttons) {
+  return `<div class="act-group">${buttons.filter(Boolean).join('')}</div>`;
+}
 
 // Password field with a show/hide eye toggle. Toggles are wired globally via delegation.
 const EYE_ICON = '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>';
@@ -316,20 +393,41 @@ function formModal(title, fields, submitLabel = 'Save') {
         input = `<div class="multiselect-box" id="${id}">${f.options.length ? f.options.map((o) => `<label class="ms-opt"><input type="checkbox" value="${esc(o.value)}" ${sel.includes(o.value) ? 'checked' : ''}> ${esc(o.label)}</label>`).join('') : '<span class="muted">No options</span>'}</div>`;
       }
       else if (f.type === 'checkbox') input = `<label class="row gap-sm" style="cursor:pointer"><input type="checkbox" id="${id}" ${f.value ? 'checked' : ''} style="width:auto"> ${esc(f.checkboxLabel || '')}</label>`;
+      // Switch — used for the Active/Inactive state that used to be a row-level
+      // "Deactivate"/"Activate" text action. The live state word next to it is
+      // updated by the delegated handler below.
+      else if (f.type === 'toggle') {
+        const on = !!f.value;
+        input = `<div class="toggle-row">
+          <label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''} role="switch" aria-checked="${on}"><span class="switch-track"><span class="switch-knob"></span></span></label>
+          <div class="toggle-copy"><label for="${id}" class="toggle-name">${esc(f.checkboxLabel || f.label || 'Active')}</label>
+            <div class="toggle-state" data-state-for="${id}">${on ? esc(f.onText || 'Active') : esc(f.offText || 'Inactive')}</div></div>
+        </div>`;
+      }
       else if (f.type === 'password') input = pwInput(id, `value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}"`);
       else input = `<input type="${f.type || 'text'}" id="${id}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}">`;
-      return `<div class="field">${f.type === 'checkbox' ? '' : `<label for="${id}">${esc(f.label)}${f.required ? ' <span class="req-star">*</span>' : ''}</label>`}${input}${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>`;
+      const hideLabel = f.type === 'checkbox' || f.type === 'toggle';
+      return `<div class="field">${hideLabel ? '' : `<label for="${id}">${esc(f.label)}${f.required ? ' <span class="req-star">*</span>' : ''}</label>`}${input}${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>`;
     }).join('');
     const foot = `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-ok>${esc(submitLabel)}</button>`;
     const { overlay, close } = openModal({
       title, bodyHTML: body, footHTML: foot,
       onMount(ov) {
         $('[data-cancel]', ov).addEventListener('click', () => { close(); resolve(null); });
+        // Keep each switch's state word (and aria-checked) truthful as it flips.
+        for (const f of fields.filter((x) => x.type === 'toggle')) {
+          const box = $('#fm_' + f.name, ov);
+          const out = $(`[data-state-for="fm_${f.name}"]`, ov);
+          if (box && out) box.addEventListener('change', () => {
+            out.textContent = box.checked ? (f.onText || 'Active') : (f.offText || 'Inactive');
+            box.setAttribute('aria-checked', String(box.checked));
+          });
+        }
         $('[data-ok]', ov).addEventListener('click', () => {
           const vals = {};
           for (const f of fields) {
             const el = $('#fm_' + f.name, ov);
-            if (f.type === 'checkbox') vals[f.name] = el.checked;
+            if (f.type === 'checkbox' || f.type === 'toggle') vals[f.name] = el.checked;
             else if (f.type === 'multiselect') vals[f.name] = $$('input[type=checkbox]', el).filter((c) => c.checked).map((c) => c.value);
             else vals[f.name] = el.value.trim();
             if (f.required && (f.type === 'multiselect' ? !vals[f.name].length : !vals[f.name])) { toast(`${f.label} is required`, 'error'); el.focus && el.focus(); return; }
@@ -999,9 +1097,10 @@ async function renderTicketDetail(id) {
   const { ticket: t, comments, activity, attachments, assignments, primaryTechnician, collaborators } = data;
   const u = state.user;
   const isDeptAdmin = u.role === 'SuperAdmin' || (u.role === 'AdminIT' && t.department === 'IT') || (u.role === 'AdminME' && t.department === 'ME');
-  // Edit rights follow the backend: only the Primary technician may edit.
-  const isAssignedTech = u.role.startsWith('Technician') && t.assigned_technician_id === u.id;
   const team = { primary: primaryTechnician, collaborators: collaborators || [] };
+  // Edit rights follow the backend: a technician on the team in EITHER role —
+  // Primary/PIC or Collaborator — may act on the ticket, same department only.
+  const isAssignedTech = !!myTeamRole(t, team) && techDeptMatches(t);
   const canReply = u.role !== 'Leader';
 
   // Group attachments by the comment they were posted with, so each reply's
@@ -1029,7 +1128,7 @@ async function renderTicketDetail(id) {
       <div class="detail-badges">${t.source === 'public_quick_report' ? '<span class="badge src-public" title="Submitted via public Quick Report">Public Quick Report</span>' : ''}</div>
     </div>
     <div class="detail-grid">
-      <div>
+      <div class="detail-main">
         <div class="card mb">
           <dl class="info-list">
             <dt>Outlet</dt><dd>${esc(t.outlet_name || t.outlet_code || '—')}${(t.outlet_name && t.outlet_code && t.outlet_name !== t.outlet_code) ? ` <span class="muted">(${esc(t.outlet_code)})</span>` : ''}${t.brand_code ? ' · ' + esc(t.brand_code) : ''}</dd>
@@ -1053,19 +1152,43 @@ async function renderTicketDetail(id) {
           <div class="divider"></div>
           <div class="tl-msg">${esc(t.description || '')}</div>
         </div>
-        ${assignedTeamHTML(t, team)}
-        ${attachments.length ? `<div class="panel mb"><div class="panel-head"><h3>Evidence & photos</h3></div><div class="card" style="border:none"><div class="tl-atts">${attachments.map(attCard).join('')}</div></div></div>` : ''}
-        <div class="panel"><div class="panel-head"><h3>Activity</h3></div><div class="card" style="border:none">
+        ${attachments.length ? `<div class="panel mb"><div class="panel-head"><h3>${svg(ICONS.image, 16)} Evidence & photos</h3></div><div class="card" style="border:none"><div class="tl-atts">${attachments.map(attCard).join('')}</div></div></div>` : ''}
+        <div class="panel"><div class="panel-head"><h3>${svg(ICONS.activity, 16)} Activity</h3></div><div class="card" style="border:none">
           <div class="timeline">${events.length ? events.map(tlItem).join('') : '<p class="muted">No activity yet.</p>'}</div>
           ${canReply ? replyBoxHTML() : '<p class="muted mt">View-only role.</p>'}
         </div></div>
       </div>
-      <div id="action-pane">${actionPaneHTML(t, isDeptAdmin, isAssignedTech)}</div>
+      <!-- Side pane: status action first, then the team that owns the ticket.
+           On mobile the whole pane is ordered above .detail-main (see CSS) so a
+           technician never scrolls past the description to update a status. -->
+      <div id="action-pane" class="detail-side">
+        ${actionPaneHTML(t, isDeptAdmin, isAssignedTech)}
+        ${assignedTeamHTML(t, team, isDeptAdmin)}
+      </div>
     </div>`;
   wireNavLinks();
   if (canReply) wireReply(t);
-  wireActionPane(t, isDeptAdmin, isAssignedTech);
+  wireActionPane(t, isDeptAdmin);
   wireAssignedTeam(t);
+}
+
+/* --------------------------------------------------------------------------
+   Who am I on this ticket?  "primary" | "collaborator" | null
+   Mirrors assignment.service.teamRoleOf, including the legacy fallback on
+   tickets.assigned_technician_id. Display only — the server re-checks.
+   -------------------------------------------------------------------------- */
+function myTeamRole(t, team) {
+  const u = state.user;
+  if (!u || !u.role.startsWith('Technician')) return null;
+  if (team.primary && team.primary.technician_id === u.id) return 'primary';
+  if ((team.collaborators || []).some((c) => c.technician_id === u.id)) return 'collaborator';
+  if (t.assigned_technician_id === u.id) return 'primary';
+  return null;
+}
+function techDeptMatches(t) {
+  const u = state.user;
+  if (!u || !u.role.startsWith('Technician')) return false;
+  return t.department === (u.role === 'TechnicianIT' ? 'IT' : 'ME');
 }
 
 /* --------------------------------------------------------------------------
@@ -1077,57 +1200,68 @@ async function renderTicketDetail(id) {
 // (Primary or Collaborator), the ticket is in their department, and it is still
 // open. The backend re-checks all of this — this is only for showing the button.
 function canInviteCollaborator(t, team) {
-  const u = state.user;
-  if (!u.role.startsWith('Technician')) return false;
-  const myDept = u.role === 'TechnicianIT' ? 'IT' : 'ME';
-  if (t.department !== myDept) return false;
-  if (['Closed', 'Cancelled'].includes(t.status)) return false;
-  const onTeam = (team.primary && team.primary.technician_id === u.id)
-    || (team.collaborators || []).some((c) => c.technician_id === u.id)
-    || t.assigned_technician_id === u.id;
-  return !!onTeam;
+  if (!techDeptMatches(t)) return false;
+  if (TERMINAL_STATUSES.includes(t.status)) return false;
+  return !!myTeamRole(t, team);
 }
-function assignedTeamHTML(t, team) {
+function assignedTeamHTML(t, team, isDeptAdmin) {
   const primaryName = (team.primary && team.primary.technician_name)
     || (t.assignee_name && t.assignee_name !== 'Unassigned' ? t.assignee_name : null);
+  const meRole = myTeamRole(t, team);
+  const youTag = (isYou) => isYou ? '<span class="team-you">you</span>' : '';
   const primaryRow = primaryName
     ? `<div class="team-row team-primary">
          <div class="team-avatar">${esc(techInitials(primaryName))}</div>
-         <div class="team-id"><div class="team-name">${esc(primaryName)}</div>
+         <div class="team-id"><div class="team-name">${esc(primaryName)}${youTag(meRole === 'primary')}</div>
            <div class="team-role">Primary Technician / PIC</div></div>
-         <span class="badge badge-pic">PIC / Primary</span>
+         <span class="badge badge-pic" title="Primary Technician / PIC">${svg(ICONS.star, 12)} PIC</span>
        </div>`
-    : `<div class="team-empty">No Primary Technician assigned yet.</div>`;
-  const collabRows = (team.collaborators || []).length
-    ? team.collaborators.map((c) => `<div class="team-row team-collab">
+    : `<div class="team-empty">${svg(ICONS.star, 14)} No Primary Technician yet.</div>`;
+  const collabs = team.collaborators || [];
+  const collabRows = collabs.length
+    ? collabs.map((c) => `<div class="team-row team-collab">
          <div class="team-avatar sm">${esc(techInitials(c.technician_name))}</div>
-         <div class="team-id"><div class="team-name">${esc(c.technician_name)}</div>
+         <div class="team-id"><div class="team-name">${esc(c.technician_name)}${youTag(c.technician_id === state.user.id)}</div>
            <div class="team-role">Collaborator</div></div>
-         <span class="badge badge-collab">Collaborator</span>
+         <span class="badge badge-collab" title="Collaborator">${svg(ICONS.userPlus, 12)}</span>
        </div>`).join('')
-    : `<div class="team-empty">No collaborators added yet.</div>`;
-  const inviteBtn = canInviteCollaborator(t, team)
-    ? `<button class="btn-outline" id="btn-invite-collab" style="padding:6px 12px">＋ Invite Collaborator</button>`
-    : '';
-  return `<div class="panel mb">
-    <div class="panel-head"><h3>Assigned Team</h3>${inviteBtn}</div>
+    : `<div class="team-empty">${svg(ICONS.userPlus, 14)} No collaborators yet.</div>`;
+  // Technicians on the team invite; admins get the full assignment manager.
+  // Both live in this card so "who is on this ticket" and "change who is on it"
+  // are never in two different places.
+  const actions = [];
+  if (canInviteCollaborator(t, team))
+    actions.push(`<button class="btn-outline btn-block" id="btn-invite-collab">${svg(ICONS.userPlus, 15)} Invite Collaborator</button>`);
+  if (isDeptAdmin)
+    actions.push(`<button class="btn-outline btn-block" id="btn-manage-assign">${svg(ICONS.users, 15)} Manage Assignment</button>`);
+  return `<div class="panel side-panel">
+    <div class="panel-head"><h3>${svg(ICONS.users, 16)} Assigned Team</h3>
+      <span class="team-count">${collabs.length + (primaryName ? 1 : 0)}</span></div>
     <div class="card" style="border:none">
       ${primaryRow}
       <div class="team-sub">Collaborators</div>
       ${collabRows}
+      ${actions.length ? `<div class="team-actions">${actions.join('')}</div>` : ''}
     </div>
   </div>`;
 }
 function wireAssignedTeam(t) {
   const btn = $('#btn-invite-collab');
   if (btn) btn.addEventListener('click', () => openInviteCollaboratorModal(t, () => renderTicketDetail(t.id)));
+  const mng = $('#btn-manage-assign');
+  if (mng) mng.addEventListener('click', () => openAssignModal(t, () => renderTicketDetail(t.id)));
 }
 // Assignment events are logged as complete sentences ("Admin added X as
 // Collaborator.") so they read as-is instead of being prefixed with a label.
 const SENTENCE_ACTIONS = ['ticket.assigned', 'ticket.collaborator_added', 'ticket.collaborator_invited', 'ticket.assignment_removed'];
 function actionText(a) {
-  if (a.detail && SENTENCE_ACTIONS.includes(a.action)) return a.detail;
-  return a.detail ? `${humanAction(a.action)} — ${a.detail}` : humanAction(a.action);
+  if (!a.detail) return humanAction(a.action);
+  if (SENTENCE_ACTIONS.includes(a.action)) return a.detail;
+  // Status changes are logged as a sentence ("T TechIT changed status from Open
+  // to On Progress."). Older rows hold a bare "Open → On Progress" and still
+  // read best with the "Status changed — " prefix.
+  if (a.action === 'status.changed' && !a.detail.includes('→')) return a.detail;
+  return `${humanAction(a.action)} — ${a.detail}`;
 }
 function humanAction(a) { return ({ 'ticket.created': 'Ticket created', 'ticket.assigned': 'Assigned', 'ticket.collaborator_added': 'Collaborator added', 'ticket.collaborator_invited': 'Collaborator invited', 'ticket.assignment_removed': 'Assignment removed', 'status.changed': 'Status changed', 'urgency.changed': 'Urgency changed', 'comment.added': 'Comment', 'department.changed': 'Re-routed', 'category.changed': 'Category changed', 'outlet.changed': 'Outlet changed' }[a] || a); }
 function tlItem(e) {
@@ -1177,67 +1311,103 @@ function canSelfAssign(t) {
   if (['Closed', 'Cancelled'].includes(t.status)) return false;
   return true;
 }
+/* --------------------------------------------------------------------------
+   Why can (or can't) this viewer update the status?
+   One function so the button state and the explanation can never disagree.
+   Returns { canUpdate, note } — `note` is a short sentence, or '' when the
+   control is simply usable and needs no explaining.
+   -------------------------------------------------------------------------- */
+function statusAccess(t, isDeptAdmin, isAssignedTech) {
+  const u = state.user;
+  const isTech = u.role.startsWith('Technician');
+  if (isDeptAdmin) return { canUpdate: true, note: '' };
+  if (TERMINAL_STATUSES.includes(t.status)) {
+    return {
+      canUpdate: false,
+      icon: 'lock',
+      note: `This ticket is already ${t.status === 'Closed' ? 'closed' : 'cancelled'}.`
+        + (isTech ? ' Only an admin can reopen it.' : ''),
+    };
+  }
+  if (isAssignedTech) return { canUpdate: true, note: '' };
+  if (isTech && !techDeptMatches(t)) {
+    return { canUpdate: false, icon: 'lock', note: `This is a ${t.department} ticket — outside your department.` };
+  }
+  if (isTech) {
+    return { canUpdate: false, icon: 'lock', note: 'You are not assigned to this ticket.' };
+  }
+  return { canUpdate: false, icon: 'clock', note: 'You’ll be notified of updates here.' };
+}
+
 function actionPaneHTML(t, isDeptAdmin, isAssignedTech) {
-  if (!isDeptAdmin && !isAssignedTech) {
+  const access = statusAccess(t, isDeptAdmin, isAssignedTech);
+  // Current status is always shown the same way, whoever is looking.
+  const head = `<div class="panel-head"><h3>${svg(ICONS.activity, 16)} Status</h3></div>`;
+  const now = `<div class="status-now">${statusIcon(t.status, 16)}${badge(t.status)}
+      ${t.status === 'On Scheduled' && t.scheduled_at ? `<span class="status-when">${svg(ICONS.calendarClock, 13)} ${fmtDate(t.scheduled_at)}</span>` : ''}</div>`;
+
+  // Read-only / blocked: show the state plus one short reason, never a dead
+  // dropdown the viewer can fiddle with.
+  if (!access.canUpdate) {
     const selfAssign = canSelfAssign(t)
-      ? `<button class="btn-primary btn-block mt" id="act-selfassign">＋ Assign to me</button>`
+      ? `<button class="btn-primary btn-block mt" id="act-selfassign">${svg(ICONS.userPlus, 15)} Assign to me</button>`
       : '';
-    return `<div class="card"><h3 style="font-size:.95rem;margin-bottom:6px">Status</h3>${badge(t.status)}<p class="muted mt" style="font-size:.8rem">You’ll be notified of updates here.</p>${selfAssign}</div>`;
+    return `<div class="panel side-panel">${head}
+      <div class="card" style="border:none">${now}
+        <p class="status-note">${svg(ICONS[access.icon] || ICONS.clock, 14)} ${esc(access.note)}</p>
+        ${selfAssign}
+      </div></div>`;
   }
-  let html = `<div class="card"><h3 style="font-size:.95rem;margin-bottom:12px">Actions</h3>`;
-  // Assignment (admin)
+
+  // Updatable: one select + one Apply. Extra detail (resolution note, schedule,
+  // sparepart note…) is asked for in a focused modal once a status is chosen,
+  // so this panel stays a two-tap action on a phone.
+  let html = `<div class="panel side-panel">${head}<div class="card" style="border:none">${now}
+    <div class="field"><label for="act-status">Change to</label>
+      <select id="act-status">${statusOptionsHTML(t, isDeptAdmin)}</select></div>`;
   if (isDeptAdmin) {
-    html += `<div class="field"><label>Assignment</label><div class="row"><div style="flex:1">${esc(t.assignee_name || 'Unassigned')}</div><button class="btn-outline" id="btn-assign" style="padding:7px 12px">${t.assigned_technician_id ? 'Reassign' : 'Assign'}</button></div></div>`;
+    html += `<div class="field"><label for="act-urg">Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
   }
-  // Status controls — technicians get the simplified daily flow, admins get the
-  // core flow plus an "Operational / advanced" group (On Scheduled, waiting
-  // states, escalation, Cancelled…). The ticket's own status is always kept as
-  // an option so a ticket sitting in an extended status is never silently
-  // overwritten and can still move forward.
-  html += `<div class="field"><label>Update status</label><select id="act-status">${statusOptionsHTML(t, isDeptAdmin)}</select></div>`;
-  if (isDeptAdmin) {
-    html += `<div class="field"><label>Urgency</label><select id="act-urg">${URGENCIES.map((s) => `<option ${s === t.urgency ? 'selected' : ''}>${s}</option>`).join('')}</select></div>`;
-  }
-  html += `<button class="btn-primary btn-block" id="act-apply">Apply</button>`;
-  if (isDeptAdmin) html += `<button class="btn-ghost btn-block mt" id="act-advanced">Re-route dept / category</button>`;
-  html += `</div>`;
+  html += `<button class="btn-primary btn-block" id="act-apply">${svg(ICONS.checkCircle, 15)} Apply</button>`;
+  if (isDeptAdmin) html += `<button class="btn-ghost btn-block mt" id="act-advanced">${svg(ICONS.swap, 15)} Re-route dept / category</button>`;
+  html += `</div></div>`;
   return html;
 }
-// Options for the "Update status" control.
-//  • Admin  → <optgroup "Main flow"> core + <optgroup "Operational / advanced">
-//             extended (On Scheduled stays available for event/printer setup).
-//  • Tech   → core daily flow only (New is display-only, it is never set by
-//             hand), plus whatever extended status the ticket already has.
-// The ticket's current status is always present and preselected, so an
-// extended-status ticket renders correctly instead of falling back to "New".
+// Options for the "Change to" control, grouped so the 4-status main flow stays
+// obvious while the operational states remain one scroll away:
+//   • Admin → main flow + every extended status the ticket can reach.
+//   • Tech  → main flow + the operational states they own (TECH_STATUSES).
+//             "New" is display-only and "Cancelled" is admin-only, so neither
+//             is offered; reopening a Closed/Cancelled ticket is admin-only too.
+// Both are filtered by canTransition(), and the ticket's current status is
+// always present and preselected, so a ticket sitting in an extended status
+// renders correctly instead of falling back to "New".
 function statusOptionsHTML(t, isDeptAdmin) {
   const opt = (s) => `<option ${s === t.status ? 'selected' : ''}>${esc(s)}</option>`;
   const reachable = (s) => s === t.status || canTransition(t.status, s);
-  if (isDeptAdmin) {
-    const core = CORE_STATUSES.filter(reachable);
-    const extended = EXTENDED_STATUSES.filter(reachable);
-    if (!CORE_STATUSES.includes(t.status) && !extended.includes(t.status)) extended.unshift(t.status);
-    return (core.length ? `<optgroup label="Main flow">${core.map(opt).join('')}</optgroup>` : '')
-      + (extended.length ? `<optgroup label="Operational / advanced">${extended.map(opt).join('')}</optgroup>` : '');
+  const settable = isDeptAdmin ? STATUSES : TECH_STATUSES;
+  const allowed = settable.filter(reachable);
+  const core = CORE_STATUSES.filter((s) => allowed.includes(s));
+  const extended = EXTENDED_STATUSES.filter((s) => allowed.includes(s));
+  // Keep the current status visible even when it is not otherwise settable
+  // (e.g. a technician looking at an "Assigned" ticket).
+  if (!core.includes(t.status) && !extended.includes(t.status)) {
+    (CORE_STATUSES.includes(t.status) ? core : extended).unshift(t.status);
   }
-  // Technician: core daily flow only (New is display-only), filtered to what the
-  // server would accept from a technician and to valid transitions. Closed and
-  // Cancelled are terminal for technicians — only an admin can reopen.
-  const terminal = ['Closed', 'Cancelled'].includes(t.status);
-  const opts = terminal ? [] : CORE_STATUSES.filter((s) => s !== 'New' && TECH_STATUSES.includes(s) && reachable(s));
-  if (!opts.includes(t.status)) opts.unshift(t.status);
-  return opts.map(opt).join('');
+  return (core.length ? `<optgroup label="Main flow">${core.map(opt).join('')}</optgroup>` : '')
+    + (extended.length ? `<optgroup label="Operational">${extended.map(opt).join('')}</optgroup>` : '');
 }
-function wireActionPane(t, isDeptAdmin, isAssignedTech) {
+function wireActionPane(t, isDeptAdmin) {
   const selfBtn = $('#act-selfassign');
   if (selfBtn) selfBtn.addEventListener('click', async () => {
+    const label = selfBtn.innerHTML;
     selfBtn.disabled = true; selfBtn.textContent = 'Assigning…';
     try { await api.assignToMe(t.id); toast('Ticket assigned to you', 'success'); renderTicketDetail(t.id); }
-    catch (e) { toast(e.message, 'error'); selfBtn.disabled = false; selfBtn.textContent = '＋ Assign to me'; }
+    catch (e) { toast(e.message, 'error'); selfBtn.disabled = false; selfBtn.innerHTML = label; }
   });
-  if (!isDeptAdmin && !isAssignedTech) return;
-  const assignBtn = $('#btn-assign'); if (assignBtn) assignBtn.addEventListener('click', () => openAssignModal(t, () => renderTicketDetail(t.id)));
   const apply = $('#act-apply');
+  if (!apply) return; // read-only / blocked pane — nothing else to wire
+  const applyLabel = apply.innerHTML;
   apply.addEventListener('click', async () => {
     const newStatus = $('#act-status').value;
     const patch = {};
@@ -1249,11 +1419,22 @@ function wireActionPane(t, isDeptAdmin, isAssignedTech) {
     if (newStatus !== t.status) patch.status = newStatus;
     if (!Object.keys(patch).length) { toast('No changes', 'info'); return; }
     apply.disabled = true; apply.textContent = 'Applying…';
-    try { await api.patchTicket(t.id, patch); toast('Ticket updated', 'success'); renderTicketDetail(t.id); }
-    catch (e) { toast(e.message, 'error'); apply.disabled = false; apply.textContent = 'Apply'; }
+    try {
+      await api.patchTicket(t.id, patch);
+      // Status changes never touch the team — say so, so nobody wonders.
+      toast(patch.status ? `Status updated to ${patch.status}` : 'Ticket updated', 'success');
+      renderTicketDetail(t.id);
+    }
+    catch (e) { toast(e.message, 'error'); apply.disabled = false; apply.innerHTML = applyLabel; }
   });
   const adv = $('#act-advanced'); if (adv) adv.addEventListener('click', () => openRerouteModal(t));
 }
+/* What each status needs on top of the status itself. Returns the extra patch
+   fields, or null when the user backed out of the dialog.
+   Hard requirements (resolution note, cancel reason, reopen reason) are enforced
+   by the server too. Everything else is optional and must never block the
+   update — a technician standing at an outlet should always be able to record
+   the real state, then fill in detail later. */
 async function collectStatusExtras(t, newStatus) {
   if (newStatus === t.status) return {};
   if (newStatus === 'Resolved' || newStatus === 'Closed') {
@@ -1265,25 +1446,39 @@ async function collectStatusExtras(t, newStatus) {
   if (newStatus === 'Cancelled') {
     return await formModal('Cancel ticket', [{ name: 'cancel_reason', label: 'Reason for cancellation', type: 'textarea', required: true }], 'Cancel ticket');
   }
+  // On Scheduled — a planned date/time is offered but optional: not knowing the
+  // slot yet is not a reason to keep the ticket in the wrong status.
   if (newStatus === 'On Scheduled') {
     return await formModal('Schedule work', [
-      { name: 'scheduled_at', label: 'Planned date & time', type: 'datetime-local', required: true, value: t.scheduled_at ? String(t.scheduled_at).replace(' ', 'T').slice(0, 16) : '' },
+      {
+        name: 'scheduled_at', label: 'Planned date & time', type: 'datetime-local',
+        value: t.scheduled_at ? String(t.scheduled_at).replace(' ', 'T').slice(0, 16) : '',
+        hint: 'Optional — you can set the slot later.',
+      },
     ], 'Set schedule');
   }
-  if (newStatus === 'Waiting Sparepart') {
-    return await formModal('Waiting for sparepart', [
-      { name: 'sparepart_note', label: 'Sparepart needed', type: 'text' },
-      { name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' },
-    ], 'Set status');
-  }
-  if (newStatus === 'Waiting Vendor') {
-    return await formModal('Waiting for vendor', [
-      { name: 'vendor_note', label: 'Vendor / detail', type: 'text' },
-      { name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' },
-    ], 'Set status');
+  // Waiting statuses — a note saying what is being waited for. Soft-required:
+  // leaving it empty warns once and then lets the update through.
+  if (WAITING_STATUSES.includes(newStatus)) {
+    const spec = {
+      'Waiting Sparepart': { title: 'Waiting for sparepart', field: 'sparepart_note', label: 'Sparepart needed', date: true },
+      'Waiting Vendor': { title: 'Waiting for vendor', field: 'vendor_note', label: 'Vendor / detail', date: true },
+      'Pending Outlet Response': { title: 'Pending outlet response', field: 'status_note', label: 'What are we waiting for from the outlet?', date: false },
+    }[newStatus];
+    const fields = [{ name: spec.field, label: spec.label, type: 'text', hint: 'Recommended — it explains the wait in the activity log.' }];
+    if (spec.date) fields.push({ name: 'expected_part_date', label: 'Expected date (optional)', type: 'date' });
+    const v = await formModal(spec.title, fields, 'Set status');
+    if (v === null) return null;
+    if (!String(v[spec.field] || '').trim()) {
+      const go = await confirmModal('No note added',
+        `Set "${newStatus}" without saying what is being waited for? The next person on this ticket will not know why it is parked.`,
+        'Set anyway', 'primary');
+      if (!go) return null;
+    }
+    return v;
   }
   // Reopening a Closed or Cancelled ticket — admin-only server side, reason required.
-  if (t.status === 'Closed' || t.status === 'Cancelled') {
+  if (TERMINAL_STATUSES.includes(t.status)) {
     return await formModal('Reopen ticket', [{ name: 'reason', label: 'Reason for reopening', type: 'textarea', required: true }], 'Reopen');
   }
   return {};
@@ -1448,14 +1643,16 @@ async function openAssignModal(t, after) {
           ${primary ? `<div class="team-row team-primary">
               <div class="team-avatar">${esc(techInitials(primary.technician_name))}</div>
               <div class="team-id"><div class="team-name">${esc(primary.technician_name)}</div><div class="team-role">Primary Technician / PIC</div></div>
-              <button type="button" class="btn-ghost danger-text" data-remove-tech="${primary.technician_id}" style="padding:4px 8px;font-size:.78rem">Remove</button>
+              ${actionGroup(iconBtn({ icon: 'trash', label: `Remove ${primary.technician_name} as Primary Technician`, title: 'Remove from ticket', danger: true, attrs: `data-remove-tech="${primary.technician_id}"` }))}
             </div>` : `<div class="team-empty">No Primary Technician assigned yet.</div>`}
           <div class="team-sub">Collaborators</div>
           ${collabs.length ? collabs.map((c) => `<div class="team-row team-collab">
               <div class="team-avatar sm">${esc(techInitials(c.technician_name))}</div>
               <div class="team-id"><div class="team-name">${esc(c.technician_name)}</div><div class="team-role">Collaborator</div></div>
-              <button type="button" class="btn-ghost" data-promote="${c.technician_id}" style="padding:4px 8px;font-size:.78rem">Change Primary</button>
-              <button type="button" class="btn-ghost danger-text" data-remove-tech="${c.technician_id}" style="padding:4px 8px;font-size:.78rem">Remove Collaborator</button>
+              ${actionGroup(
+                iconBtn({ icon: 'star', label: `Make ${c.technician_name} the Primary Technician`, title: 'Set as Primary', attrs: `data-promote="${c.technician_id}"` }),
+                iconBtn({ icon: 'trash', label: `Remove ${c.technician_name} from Collaborators`, title: 'Remove Collaborator', danger: true, attrs: `data-remove-tech="${c.technician_id}"` }),
+              )}
             </div>`).join('') : `<div class="team-empty">No collaborators added yet.</div>`}`;
 
         $$('[data-remove-tech]', ov).forEach((b) => b.addEventListener('click', () =>
@@ -1731,8 +1928,8 @@ function renderSchedCardsView() {
     const byDay = [[], [], [], [], [], [], []];
     row.schedules.forEach((s) => { if (byDay[s.day_of_week]) byDay[s.day_of_week].push(s); });
     byDay.forEach((a) => a.sort((x, y) => String(x.start_time).localeCompare(String(y.start_time))));
-    const week = DOW.map((dn, i) => `<div class="sched-daycol${i === today ? ' is-today' : ''}"><div class="sched-dayname">${dn}</div><div class="sched-daybody">${byDay[i].length ? byDay[i].map((s) => `<div class="sched-block"><span class="sched-time">${esc(s.start_time)}–${esc(s.end_time)}</span><button class="sched-del" data-del="${s.id}" data-tech="${t.id}" title="Remove">✕</button></div>`).join('') : '<div class="sched-off-cell">Off</div>'}</div></div>`).join('');
-    const timeoff = row.unavailability.length ? `<div class="sched-timeoff"><div class="sched-timeoff-label">Day off / blocked time</div><div class="sched-timeoff-list">${row.unavailability.map((u) => `<div class="sched-offblock"><span class="sched-offblock-range">${esc(fmtDate(u.start_datetime))} → ${esc(fmtDate(u.end_datetime))}</span>${u.reason ? `<span class="sched-offblock-reason">${esc(u.reason)}</span>` : ''}<button class="sched-del" data-udel="${u.id}" data-tech="${t.id}" title="Remove">✕</button></div>`).join('')}</div></div>` : '';
+    const week = DOW.map((dn, i) => `<div class="sched-daycol${i === today ? ' is-today' : ''}"><div class="sched-dayname">${dn}</div><div class="sched-daybody">${byDay[i].length ? byDay[i].map((s) => `<div class="sched-block"><span class="sched-time">${esc(s.start_time)}–${esc(s.end_time)}</span><button type="button" class="sched-del" data-del="${s.id}" data-tech="${t.id}" title="Remove working hours" aria-label="Remove working hours ${esc(s.start_time)}–${esc(s.end_time)}">${svg(ICONS.trash, 13)}</button></div>`).join('') : '<div class="sched-off-cell">Off</div>'}</div></div>`).join('');
+    const timeoff = row.unavailability.length ? `<div class="sched-timeoff"><div class="sched-timeoff-label">Day off / blocked time</div><div class="sched-timeoff-list">${row.unavailability.map((u) => `<div class="sched-offblock"><span class="sched-offblock-range">${esc(fmtDate(u.start_datetime))} → ${esc(fmtDate(u.end_datetime))}</span>${u.reason ? `<span class="sched-offblock-reason">${esc(u.reason)}</span>` : ''}<button type="button" class="sched-del" data-udel="${u.id}" data-tech="${t.id}" title="Remove day off / blocked time" aria-label="Remove day off block">${svg(ICONS.trash, 13)}</button></div>`).join('')}</div></div>` : '';
     const hint = row.schedules.length ? '' : `<div class="sched-emptyhint">No working hours set yet.</div>`;
     return `<div class="panel sched-tech sched-dept-${dept}">
       <div class="sched-tech-head"><div class="sched-tech-id"><span class="sched-avatar">${esc(techInitials(t.username))}</span><div class="sched-tech-meta"><div class="sched-tech-name">${esc(t.username)} ${deptTag(dept)}</div><div class="sched-tech-sub">${dept} Technician · <strong>${t.workload}</strong> open</div></div></div>
@@ -1841,14 +2038,15 @@ function openEventPopover(el) {
 }
 
 // Lightweight confirm dialog → resolves true (confirmed) / false (cancelled)
-function confirmModal(title, message, okLabel = 'Delete') {
+// variant: 'danger' (default, destructive) | 'primary' (a soft "are you sure?")
+function confirmModal(title, message, okLabel = 'Delete', variant = 'danger') {
   return new Promise((resolve) => {
     let settled = false;
     const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
     openModal({
       title,
       bodyHTML: `<p class="confirm-text">${esc(message)}</p>`,
-      footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-danger" data-ok>${esc(okLabel)}</button>`,
+      footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-${variant === 'primary' ? 'primary' : 'danger'}" data-ok>${esc(okLabel)}</button>`,
       onMount(ov, close) {
         $('[data-ok]', ov).addEventListener('click', () => { settle(true); close(); });
         $('[data-cancel]', ov).addEventListener('click', () => { settle(false); close(); });
@@ -1936,10 +2134,10 @@ async function renderReports() {
       </div>
       <div class="row wrap gap-sm">
         <button class="btn-primary" id="r-run">Generate</button>
-        <button class="btn-outline" id="r-csv-raw">CSV: tickets</button>
-        <button class="btn-outline" id="r-csv-tech">CSV: technicians</button>
-        <button class="btn-outline" id="r-csv-sla">CSV: SLA detail</button>
-        <button class="btn-outline" id="r-print">Print</button>
+        <button class="btn-outline" id="r-csv-raw">${svg(ICONS.download, 15)} CSV: tickets</button>
+        <button class="btn-outline" id="r-csv-tech">${svg(ICONS.download, 15)} CSV: technicians</button>
+        <button class="btn-outline" id="r-csv-sla">${svg(ICONS.download, 15)} CSV: SLA detail</button>
+        <button class="btn-outline" id="r-print">${svg(ICONS.printer, 15)} Print</button>
       </div>
     </div>
     <div class="tabbar no-print" id="r-tabs">${REPORT_TABS.map(([k, l]) => `<button class="tab ${k === _reportTab ? 'active' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
@@ -2214,7 +2412,16 @@ function userRow(u) {
     <td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.department || '—')}</td>
     <td>${esc(access)}</td>
     <td>${u.is_active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>'}</td>
-    <td class="nowrap"><button class="btn-ghost" data-edit="${u.id}" style="padding:6px 8px">Edit</button>${self ? '' : `<button class="btn-ghost" data-del="${u.id}" style="padding:6px 8px;color:var(--danger)">Del</button>`}</td>
+    ${actionCell(
+      iconBtn({ icon: 'pencil', label: `Edit ${u.username}`, title: 'Edit', attrs: `data-edit="${u.id}"` }),
+      // Own account: shown but disabled, with the reason — the backend refuses
+      // it too ("You cannot delete your own account.").
+      iconBtn({
+        icon: 'trash', label: `Delete ${u.username}`, danger: true, disabled: self,
+        title: self ? 'You cannot delete your own account' : 'Delete',
+        attrs: self ? '' : `data-del="${u.id}"`,
+      }),
+    )}
   </tr>`;
 }
 const ALL_ROLES = ['Requestor', 'TechnicianIT', 'TechnicianME', 'AdminIT', 'AdminME', 'Leader', 'SuperAdmin'];
@@ -2253,7 +2460,9 @@ async function openUserModal(u, after) {
       { name: 'all_outlets', label: '', type: 'checkbox', checkboxLabel: 'All-outlet access (technician can see whole department)', value: u ? !!u.all_outlets : false },
     ] : []),
     { name: 'can_close_override', label: '', type: 'checkbox', checkboxLabel: 'Technician may close tickets', value: u ? !!u.can_close_override : false },
-    { name: 'is_active', label: '', type: 'checkbox', checkboxLabel: 'Active', value: u ? !!u.is_active : true },
+    // Account state lives here, not as a row action.
+    { name: 'is_active', label: 'Active', type: 'toggle', checkboxLabel: 'Active', value: u ? !!u.is_active : true,
+      hint: 'Off = the account is kept but cannot sign in.' },
     { name: 'password', label: isEdit ? 'New password (blank = keep)' : 'Password', type: 'password', required: !isEdit, hint: 'Min 10 chars, upper/lower/number/special' },
   ];
 
@@ -2275,11 +2484,30 @@ async function openUserModal(u, after) {
     toast(isEdit ? 'User updated' : 'User created', 'success'); after();
   } catch (e) { toast(e.message, 'error'); }
 }
-async function confirmDeleteUser(u, after) {
-  const v = await formModal('Delete ' + u.username + '?', [{ name: 'c', label: '', type: 'checkbox', checkboxLabel: 'Yes, permanently delete this user', value: false }], 'Delete');
-  if (!v || !v.c) return;
-  try { await api.delUser(u.id); toast('User deleted', 'success'); after(); } catch (e) { toast(e.message, 'error'); }
+/* Shared delete flow for the master-data tables. Confirm first, never delete on
+   the click itself; on success toast + refresh; on failure surface the server's
+   message. When the server refuses because the record is still referenced it
+   says so and points at the Active toggle, so the operator has a way forward
+   instead of a dead end. */
+async function confirmDeleteRow({ what, name, note, del, after }) {
+  const ok = await confirmModal(
+    `Delete ${what}?`,
+    `"${name}" will be permanently deleted. This cannot be undone.` + (note ? ` ${note}` : ''),
+    'Delete',
+  );
+  if (!ok) return;
+  try {
+    await del();
+    toast(`${what[0].toUpperCase()}${what.slice(1)} deleted`, 'success');
+    await after();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
+const confirmDeleteUser = (u, after) => confirmDeleteRow({
+  what: 'user', name: u.username, del: () => api.delUser(u.id), after,
+  note: 'Set Active off in Edit instead if you only want to block sign-in.',
+});
 
 // ==========================================================================
 // View: Categories (Admin Category Creation & Management Menu)
@@ -2325,7 +2553,6 @@ async function renderCategories() {
     
     // Bind actions
     $$('[data-edit-cat]').forEach((b) => b.addEventListener('click', () => openCategoryModal(all.find((x) => x.id == b.dataset.editCat), reload)));
-    $$('[data-toggle-cat]').forEach((b) => b.addEventListener('click', () => toggleCategoryActive(all.find((x) => x.id == b.dataset.toggleCat), reload)));
     $$('[data-del-cat]').forEach((b) => b.addEventListener('click', () => confirmDeleteCategory(all.find((x) => x.id == b.dataset.delCat), reload)));
   };
 
@@ -2352,18 +2579,15 @@ async function renderCategories() {
 
 function categoryRow(c) {
   const statusBadge = c.active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>';
-  const toggleLabel = c.active ? 'Deactivate' : 'Activate';
-  const toggleClass = c.active ? 'color:var(--warn)' : 'color:var(--ok)';
   return `
     <tr>
       <td><strong>${esc(c.name)}</strong></td>
       <td>${deptTag(c.department_code)}</td>
       <td>${statusBadge}</td>
-      <td class="nowrap">
-        <button class="btn-ghost" data-edit-cat="${c.id}" style="padding:6px 8px">Edit</button>
-        <button class="btn-ghost" data-toggle-cat="${c.id}" style="padding:6px 8px;${toggleClass}">${toggleLabel}</button>
-        <button class="btn-ghost" data-del-cat="${c.id}" style="padding:6px 8px;color:var(--danger)">Del</button>
-      </td>
+      ${actionCell(
+        iconBtn({ icon: 'pencil', label: `Edit category ${c.name}`, title: 'Edit', attrs: `data-edit-cat="${c.id}"` }),
+        iconBtn({ icon: 'trash', label: `Delete category ${c.name}`, title: 'Delete', danger: true, attrs: `data-del-cat="${c.id}"` }),
+      )}
     </tr>`;
 }
 
@@ -2392,14 +2616,24 @@ async function openCategoryModal(c, after) {
       label: 'Sort Order',
       type: 'number',
       value: c ? String(c.sort_order) : '0'
+    },
+    // Replaces the old row-level Deactivate/Activate action.
+    {
+      name: 'active',
+      label: 'Active',
+      type: 'toggle',
+      checkboxLabel: 'Active',
+      value: c ? !!c.active : true,
+      hint: 'Off = hidden from new ticket forms, but kept on existing tickets and reports.'
     }
   ], isEdit ? 'Save' : 'Create');
-  
+
   if (!v) return;
   const payload = {
     department_code: v.department_code,
     name: v.name,
-    sort_order: Number(v.sort_order) || 0
+    sort_order: Number(v.sort_order) || 0,
+    active: v.active
   };
   
   try {
@@ -2416,36 +2650,10 @@ async function openCategoryModal(c, after) {
   }
 }
 
-async function toggleCategoryActive(c, after) {
-  try {
-    await api.patchCategory(c.id, { active: !c.active });
-    toast(`Category ${c.active ? 'deactivated' : 'activated'}`, 'success');
-    after();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
-
-async function confirmDeleteCategory(c, after) {
-  const v = await formModal('Delete Category: ' + c.name + '?', [
-    { 
-      name: 'confirm', 
-      label: '', 
-      type: 'checkbox', 
-      checkboxLabel: 'Yes, permanently delete this category', 
-      value: false 
-    }
-  ], 'Delete');
-  
-  if (!v || !v.confirm) return;
-  try {
-    await api.deleteCategory(c.id);
-    toast('Category deleted', 'success');
-    after();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
+const confirmDeleteCategory = (c, after) => confirmDeleteRow({
+  what: 'category', name: c.name, del: () => api.deleteCategory(c.id), after,
+  note: 'Set Active off in Edit instead if it is still used by existing tickets.',
+});
 
 // ==========================================================================
 // View: Locations (Admin Location Creation & Management Menu)
@@ -2496,7 +2704,6 @@ async function renderLocations() {
     
     // Bind actions
     $$('[data-edit-loc]').forEach((b) => b.addEventListener('click', () => openOutletModal(all.find((x) => x.id == b.dataset.editLoc), reload)));
-    $$('[data-toggle-loc]').forEach((b) => b.addEventListener('click', () => toggleOutletActive(all.find((x) => x.id == b.dataset.toggleLoc), reload)));
     $$('[data-del-loc]').forEach((b) => b.addEventListener('click', () => confirmDeleteOutlet(all.find((x) => x.id == b.dataset.delLoc), reload)));
   };
 
@@ -2523,8 +2730,6 @@ async function renderLocations() {
 
 function outletRow(o) {
   const statusBadge = o.active ? '<span class="badge st-Resolved">Active</span>' : '<span class="badge st-Cancelled">Inactive</span>';
-  const toggleLabel = o.active ? 'Deactivate' : 'Activate';
-  const toggleClass = o.active ? 'color:var(--warn)' : 'color:var(--ok)';
   return `
     <tr>
       <td><strong>${esc(o.code)}</strong></td>
@@ -2532,11 +2737,10 @@ function outletRow(o) {
       <td><span class="badge" style="background:var(--surface-2);color:var(--text);border:1px solid var(--border)">${esc(o.brand_code)}</span></td>
       <td>${esc(o.region || 'Jakarta')}</td>
       <td>${statusBadge}</td>
-      <td class="nowrap">
-        <button class="btn-ghost" data-edit-loc="${o.id}" style="padding:6px 8px">Edit</button>
-        <button class="btn-ghost" data-toggle-loc="${o.id}" style="padding:6px 8px;${toggleClass}">${toggleLabel}</button>
-        <button class="btn-ghost" data-del-loc="${o.id}" style="padding:6px 8px;color:var(--danger)">Del</button>
-      </td>
+      ${actionCell(
+        iconBtn({ icon: 'pencil', label: `Edit location ${o.name}`, title: 'Edit', attrs: `data-edit-loc="${o.id}"` }),
+        iconBtn({ icon: 'trash', label: `Delete location ${o.name}`, title: 'Delete', danger: true, attrs: `data-del-loc="${o.id}"` }),
+      )}
     </tr>`;
 }
 
@@ -2590,6 +2794,15 @@ async function openOutletModal(o, after) {
       type: 'select',
       value: o ? (o.region || 'Jakarta') : 'Jakarta',
       options: REGIONS.map((r) => ({ value: r, label: r }))
+    },
+    // Replaces the old row-level Deactivate/Activate action.
+    {
+      name: 'active',
+      label: 'Active',
+      type: 'toggle',
+      checkboxLabel: 'Active',
+      value: o ? !!o.active : true,
+      hint: 'Off = hidden from new ticket forms, but kept on existing tickets and reports.'
     }
   ], isEdit ? 'Save' : 'Create');
 
@@ -2607,7 +2820,8 @@ async function openOutletModal(o, after) {
     code: v.code.trim().toUpperCase(),
     name: v.name.trim(),
     display_label: (v.display_label.trim() || v.name.trim()),
-    region: v.region || 'Jakarta'
+    region: v.region || 'Jakarta',
+    active: v.active
   };
 
   try {
@@ -2624,36 +2838,10 @@ async function openOutletModal(o, after) {
   }
 }
 
-async function toggleOutletActive(o, after) {
-  try {
-    await api.patchOutlet(o.id, { active: !o.active });
-    toast(`Location ${o.active ? 'deactivated' : 'activated'}`, 'success');
-    after();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
-
-async function confirmDeleteOutlet(o, after) {
-  const v = await formModal('Delete Location: ' + o.name + '?', [
-    { 
-      name: 'confirm', 
-      label: '', 
-      type: 'checkbox', 
-      checkboxLabel: 'Yes, permanently delete this location', 
-      value: false 
-    }
-  ], 'Delete');
-  
-  if (!v || !v.confirm) return;
-  try {
-    await api.deleteOutlet(o.id);
-    toast('Location deleted', 'success');
-    after();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
+const confirmDeleteOutlet = (o, after) => confirmDeleteRow({
+  what: 'location', name: o.name, del: () => api.deleteOutlet(o.id), after,
+  note: 'Set Active off in Edit instead if it is still used by existing tickets.',
+});
 
 // ==========================================================================
 // View: Import / Export (CSV) — SuperAdmin (import) + admins (export)
@@ -2676,8 +2864,8 @@ async function renderImportExport() {
             <p style="font-size:.8rem;margin-bottom:8px"><code>${esc(m.cols)}</code></p>
             <p class="hint" style="padding:0 0 12px">${esc(m.upsert)}</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn-outline" data-export="${m.key}" data-file="${m.file}">⬇ Export</button>
-              ${isSuper ? `<button class="btn-primary" data-import="${m.key}">⬆ Import</button>` : ''}
+              <button class="btn-outline" data-export="${m.key}" data-file="${m.file}">${svg(ICONS.download, 15)} Export</button>
+              ${isSuper ? `<button class="btn-primary" data-import="${m.key}">${svg(ICONS.upload, 15)} Import</button>` : ''}
             </div>
           </div>
         </div>`).join('')}

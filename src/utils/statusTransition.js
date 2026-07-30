@@ -115,7 +115,14 @@ function canTransition(current, next) {
   return allowed.includes(next);
 }
 
-function validateTransition(ticket, next, body, user) {
+/**
+ * validateTransition(ticket, next, body, user, opts)
+ *
+ * opts.isTeamMember — the actor is on the ticket's assignment team (Primary/PIC
+ *   or Collaborator). A collaborator counts as "a technician is on this job",
+ *   so they can start work even on a ticket whose PIC column is empty.
+ */
+function validateTransition(ticket, next, body, user, opts = {}) {
   if (!ALL_STATUSES.includes(next)) return "Invalid status value";
   if (
     next === "Resolved" &&
@@ -139,13 +146,16 @@ function validateTransition(ticket, next, body, user) {
     (next === "Closed" || next === "Resolved") &&
     ["New", "Open", "Assigned", "On Scheduled"].includes(ticket.status)
   ) {
-    return `A ticket must move to On Progress before it can be ${next === "Closed" ? "Closed" : "Resolved"}`;
+    return next === "Closed"
+      ? "Move ticket to On Progress before closing."
+      : "Move ticket to On Progress before marking it Resolved.";
   }
-  // Starting work needs an assigned technician, except an admin may start work
-  // immediately (New/Open → On Progress) without a technician on record.
+  // Starting work needs somebody on the job: the PIC column, a team member
+  // (Primary or Collaborator), or an admin starting it themselves.
   if (
     next === "On Progress" &&
     !ticket.assigned_technician_id &&
+    !opts.isTeamMember &&
     !isAdmin(user)
   ) {
     return "Assign a technician before starting work";

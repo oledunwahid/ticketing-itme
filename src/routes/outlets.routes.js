@@ -159,6 +159,37 @@ router.delete(
       const id = parseInt(req.params.id, 10);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid outlet ID" });
 
+      const outlet = await db.pGet(
+        "SELECT id, code, name FROM outlets WHERE id = ?",
+        [id],
+      );
+      if (!outlet) return res.status(404).json({ error: "Outlet not found" });
+
+      // In use → refuse, and point at the Active toggle. Tickets and PIC
+      // coverage reference outlets by code; deleting one strands them.
+      const tickets = await db.pGet(
+        "SELECT COUNT(*) c FROM tickets WHERE outlet_code = ?",
+        [outlet.code],
+      );
+      const pic = await db.pGet(
+        "SELECT COUNT(*) c FROM user_outlet_access WHERE outlet_code = ?",
+        [outlet.code],
+      );
+      const refs = (tickets ? tickets.c : 0) + (pic ? pic.c : 0);
+      if (refs > 0) {
+        const parts = [];
+        if (tickets && tickets.c) parts.push(`${tickets.c} ticket(s)`);
+        if (pic && pic.c) parts.push(`${pic.c} technician PIC assignment(s)`);
+        return res.status(409).json({
+          error:
+            `"${outlet.name}" (${outlet.code}) is used by ${parts.join(" and ")} ` +
+            `and cannot be deleted. Switch Active off in Edit instead — it stays on ` +
+            `existing tickets and reports but disappears from new ticket forms.`,
+          in_use: true,
+          used_by: refs,
+        });
+      }
+
       const r = await db.pRun("DELETE FROM outlets WHERE id = ?", [id]);
       if (r.changes === 0) return res.status(404).json({ error: "Outlet not found" });
       res.json({ success: true });

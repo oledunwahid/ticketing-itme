@@ -32,10 +32,14 @@ const REPORT_ROLES = ["SuperAdmin", "AdminIT", "AdminME", "Leader"];
 // --- Shared: build the scoped + filtered ticket query ----------------------
 async function scopedTicketSql(user, q) {
   const scope = await buildTicketScope(user);
-  const clause = scope.clause.replace(
-    /\b(requestor_user_id|customer_email|assigned_technician_id|department|brand_code|outlet_code)\b/g,
-    "t.$1",
-  );
+  const clause = scope.clause
+    .replace(
+      /\b(requestor_user_id|customer_email|assigned_technician_id|department|brand_code|outlet_code)\b/g,
+      "t.$1",
+    )
+    // The technician scope correlates a subquery on tickets.id; here the table
+    // is aliased, so the qualified reference has to follow the alias.
+    .replace(/\btickets\.id\b/g, "t.id");
   let sql = `SELECT t.*, o.display_label AS outlet_display, o.region AS outlet_region
              FROM tickets t
              LEFT JOIN outlets o ON o.code = t.outlet_code

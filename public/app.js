@@ -1413,16 +1413,39 @@ function wireActionPane(t, isDeptAdmin) {
     const patch = {};
     if (isDeptAdmin && $('#act-urg') && $('#act-urg').value !== t.urgency) patch.urgency = $('#act-urg').value;
     // Collect required extras for certain transitions
-    const extra = await collectStatusExtras(t, newStatus);
-    if (extra === null && newStatus !== t.status) return; // cancelled dialog
+    const extra = await collectStatusExtras(t, newStatus, isDeptAdmin);
+    if (extra === null) return; // user cancelled dialog
+
+    let picReassigned = false;
+    if (extra && extra.reassign_pic_id !== undefined) {
+      const newTechId = extra.reassign_pic_id ? Number(extra.reassign_pic_id) : null;
+      const currentPicId = t.assigned_technician_id;
+      if (newTechId && newTechId !== currentPicId) {
+        try {
+          await api.assign(t.id, { technician_id: newTechId, role_type: 'primary' });
+          picReassigned = true;
+        } catch (e) {
+          toast(e.message, 'error');
+          return;
+        }
+      }
+      delete extra.reassign_pic_id;
+    }
+
     Object.assign(patch, extra || {});
     if (newStatus !== t.status) patch.status = newStatus;
-    if (!Object.keys(patch).length) { toast('No changes', 'info'); return; }
+    if (!Object.keys(patch).length && !picReassigned) { toast('No changes', 'info'); return; }
     apply.disabled = true; apply.textContent = 'Applying…';
     try {
-      await api.patchTicket(t.id, patch);
-      // Status changes never touch the team — say so, so nobody wonders.
-      toast(patch.status ? `Status updated to ${patch.status}` : 'Ticket updated', 'success');
+      if (Object.keys(patch).length) {
+        await api.patchTicket(t.id, patch);
+      }
+      const msg = picReassigned && patch.status
+        ? `Status updated to ${patch.status} & PIC reassigned`
+        : picReassigned
+          ? 'PIC utama reassigned'
+          : patch.status ? `Status updated to ${patch.status}` : 'Ticket updated';
+      toast(msg, 'success');
       renderTicketDetail(t.id);
     }
     catch (e) { toast(e.message, 'error'); apply.disabled = false; apply.innerHTML = applyLabel; }
@@ -1435,8 +1458,61 @@ function wireActionPane(t, isDeptAdmin) {
    by the server too. Everything else is optional and must never block the
    update — a technician standing at an outlet should always be able to record
    the real state, then fill in detail later. */
-async function collectStatusExtras(t, newStatus) {
-  if (newStatus === t.status) return {};
+async function collectStatusExtras(t, newStatus, isDeptAdmin = false) {
+  if (newStatus === t.status && (newStatus !== 'Open' || !isDeptAdmin)) return {};
+
+  if (newStatus === 'Open' && isDeptAdmin) {
+    try {
+      const [ticketBundle, techs] = await Promise.all([
+        api.ticket(t.id).catch(() => null),
+        api.technicians(t.department).catch(() => []),
+      ]);
+      const primary = ticketBundle ? ticketBundle.primaryTechnician : null;
+      const currentPicId = primary ? primary.technician_id : (t.assigned_technician_id || null);
+      const currentPicName = primary ? primary.technician_name : (t.assignee_name && t.assignee_name !== 'Unassigned' ? t.assignee_name : null);
+
+      const options = [];
+      if (currentPicId) {
+        options.push({ value: String(currentPicId), label: `${currentPicName || 'Technician'} (PIC Utama saat ini)` });
+      } else {
+        options.push({ value: '', label: '-- Pilih PIC Utama --' });
+      }
+      for (const tech of techs) {
+        if (tech.id !== currentPicId) {
+          options.push({ value: String(tech.id), label: `${tech.username} (${tech.workload != null ? tech.workload + ' tiket open' : 'Teknisi'})` });
+        }
+      }
+
+      const fields = [];
+      const isReopen = TERMINAL_STATUSES.includes(t.status);
+      if (isReopen) {
+        fields.push({
+          name: 'reason',
+          label: 'Reason for reopening',
+          type: 'textarea',
+          required: true,
+          placeholder: 'Reason for reopening this ticket...',
+        });
+      }
+      fields.push({
+        name: 'reassign_pic_id',
+        label: 'Primary Technician / PIC Utama',
+        type: 'select',
+        value: String(currentPicId || ''),
+        options,
+        hint: 'Opsional: Ubah atau re-assign PIC Utama untuk tiket ini.',
+      });
+
+      const modalTitle = isReopen ? 'Reopen Ticket & Manage PIC' : 'Set Status Open & PIC Utama';
+      const submitLabel = isReopen ? 'Reopen Ticket' : 'Set Status';
+      const v = await formModal(modalTitle, fields, submitLabel);
+      return v;
+    } catch (e) {
+      console.error('Error fetching technicians for Open status modal:', e);
+      return {};
+    }
+  }
+
   if (newStatus === 'Resolved' || newStatus === 'Closed') {
     if (t.resolution_note && newStatus === 'Closed') return {};
     const v = await formModal(newStatus === 'Resolved' ? 'Mark Resolved' : 'Close ticket',

@@ -8,9 +8,10 @@
    shapes unchanged. Mounted at "/" so full "/api/..." paths are preserved.
 
    Endpoints:
-     GET /api/tickets        (scoped list)
-     GET /api/tickets/:id    (scoped detail bundle)
-     GET /api/dashboard      (scoped ticket summary)
+     GET /api/tickets         (scoped list)
+     GET /api/tickets/export  (scoped list as CSV — same filters as the list)
+     GET /api/tickets/:id     (scoped detail bundle)
+     GET /api/dashboard       (scoped ticket summary)
    ========================================================================== */
 const express = require("express");
 const crypto = require("crypto");
@@ -55,76 +56,182 @@ const {
   OPEN_ASSIGNED_STATUSES,
 } = require("../../services/recommend");
 const { notify } = require("../../services/notifications");
+const { toCsv } = require("../utils/csv");
 
 const router = express.Router();
 
+// --------------------------------------------------------------------------
+// Shared list query — the scope clause, filters and ordering used by BOTH the
+// ticket list and the CSV export, so an export can never widen (or narrow)
+// what the list on screen shows.
+// Returns { where, params, orderBy }. The scope clause references the tickets
+// table by bare column names (and `tickets.id`), so callers must keep the table
+// unaliased and must not JOIN tables that share column names with it.
+// --------------------------------------------------------------------------
+async function buildTicketListQuery(user, query) {
+  const {
+    status,
+    priority,
+    urgency,
+    department,
+    brand,
+    outlet,
+    region,
+    category,
+    search,
+    assigned,
+    scope: techFilter,
+    sort,
+    status_group: statusGroupFilter,
+  } = query;
+  const scope = await buildTicketScope(user, { techFilter });
+  let where = scope.clause;
+  const params = [...scope.params];
+  const add = (frag, ...vals) => {
+    where += frag;
+    params.push(...vals);
+  };
+
+  if (status) add(" AND status = ?", status);
+  // Optional grouped filter (dashboard core-card drill-down). Expands to the
+  // real statuses in that group — the stored status is never rewritten.
+  if (statusGroupFilter && STATUS_GROUPS.includes(statusGroupFilter)) {
+    const members = statusesInGroup(statusGroupFilter);
+    add(` AND status IN (${members.map(() => "?").join(",")})`, ...members);
+  }
+  if (urgency) add(" AND urgency = ?", urgency);
+  if (priority) add(" AND urgency = ?", priority); // legacy alias
+  if (department && DEPARTMENTS.includes(department))
+    add(" AND department = ?", department);
+  if (brand) add(" AND brand_code = ?", brand);
+  if (outlet) add(" AND outlet_code = ?", outlet);
+  if (region) add(" AND region = ?", region);
+  if (category) add(" AND category = ?", category);
+  // Unassigned filter (dashboard "Unassigned" card drill-down). Matches the
+  // dashboard count: no primary technician and not Closed/Cancelled.
+  if (assigned === "no" || assigned === "unassigned")
+    add(" AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')");
+  if (search) {
+    add(
+      " AND (title LIKE ? OR description LIKE ? OR ticket_number LIKE ? OR customer_name LIKE ? OR customer_email LIKE ?)",
+      `%${search}%`,
+      `%${search}%`,
+      `%${search}%`,
+      `%${search}%`,
+      `%${search}%`,
+    );
+  }
+
+  // Default sort is newest-first (created_at DESC). Urgency ordering is only
+  // applied when explicitly requested — it never controls the default.
+  let orderBy;
+  if (sort === "created_asc") orderBy = " ORDER BY created_at ASC";
+  else if (sort === "urgency")
+    orderBy = ` ORDER BY CASE urgency WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END ASC, created_at DESC`;
+  else orderBy = " ORDER BY created_at DESC"; // default (also 'created_desc')
+
+  return { where, params, orderBy };
+}
+
 router.get("/api/tickets", requireAuth, async (req, res) => {
   try {
-    const {
-      status,
-      priority,
-      urgency,
-      department,
-      brand,
-      outlet,
-      region,
-      category,
-      search,
-      assigned,
-      scope: techFilter,
-      sort,
-      status_group: statusGroupFilter,
-    } = req.query;
-    const scope = await buildTicketScope(req.user, { techFilter });
-    let sql = `SELECT * FROM tickets WHERE ${scope.clause}`;
-    const params = [...scope.params];
-    const add = (frag, ...vals) => {
-      sql += frag;
-      params.push(...vals);
-    };
-
-    if (status) add(" AND status = ?", status);
-    // Optional grouped filter (dashboard core-card drill-down). Expands to the
-    // real statuses in that group — the stored status is never rewritten.
-    if (statusGroupFilter && STATUS_GROUPS.includes(statusGroupFilter)) {
-      const members = statusesInGroup(statusGroupFilter);
-      add(
-        ` AND status IN (${members.map(() => "?").join(",")})`,
-        ...members,
-      );
-    }
-    if (urgency) add(" AND urgency = ?", urgency);
-    if (priority) add(" AND urgency = ?", priority); // legacy alias
-    if (department && DEPARTMENTS.includes(department))
-      add(" AND department = ?", department);
-    if (brand) add(" AND brand_code = ?", brand);
-    if (outlet) add(" AND outlet_code = ?", outlet);
-    if (region) add(" AND region = ?", region);
-    if (category) add(" AND category = ?", category);
-    // Unassigned filter (dashboard "Unassigned" card drill-down). Matches the
-    // dashboard count: no primary technician and not Closed/Cancelled.
-    if (assigned === "no" || assigned === "unassigned")
-      add(" AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')");
-    if (search) {
-      add(
-        " AND (title LIKE ? OR description LIKE ? OR ticket_number LIKE ? OR customer_name LIKE ? OR customer_email LIKE ?)",
-        `%${search}%`,
-        `%${search}%`,
-        `%${search}%`,
-        `%${search}%`,
-        `%${search}%`,
-      );
-    }
-    // Default sort is newest-first (created_at DESC). Urgency ordering is only
-    // applied when explicitly requested — it never controls the default.
-    if (sort === "created_asc") sql += " ORDER BY created_at ASC";
-    else if (sort === "urgency")
-      sql += ` ORDER BY CASE urgency WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END ASC, created_at DESC`;
-    else sql += " ORDER BY created_at DESC"; // default (also 'created_desc')
-    res.json(await db.pAll(sql, params));
+    const { where, params, orderBy } = await buildTicketListQuery(
+      req.user,
+      req.query,
+    );
+    res.json(
+      await db.pAll(`SELECT * FROM tickets WHERE ${where}${orderBy}`, params),
+    );
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch tickets" });
+  }
+});
+
+// ==========================================================================
+// CSV export of the ticket list
+// Accepts exactly the same query params as GET /api/tickets and is scoped by
+// the same buildTicketScope clause — a user can only ever export the rows they
+// can already see in the list.
+// NOTE: must stay ABOVE "/api/tickets/:id" or "export" is read as an id.
+// ==========================================================================
+// [csv header, ticket field | (ticket) => value]
+const EXPORT_COLUMNS = [
+  ["Ticket Number", (t) => t.ticket_number || "#" + t.id],
+  ["Title", "title"],
+  ["Status", "status"],
+  ["Urgency", "urgency"],
+  ["Department", "department"],
+  ["Category", "category"],
+  ["Brand", "brand_code"],
+  ["Outlet Code", "outlet_code"],
+  ["Outlet Name", "outlet_name"],
+  ["Region", "region"],
+  ["Requestor", "customer_name"],
+  ["Requestor Email", "customer_email"],
+  ["Contact Person", "contact_person"],
+  ["Contact Number", "contact_number"],
+  ["Assignee", "assignee_name"],
+  ["Source", "source"],
+  ["Created At", "created_at"],
+  ["Assigned At", "assigned_at"],
+  ["First Response At", "first_response_at"],
+  ["Started At", "started_at"],
+  ["Scheduled At", "scheduled_at"],
+  ["Scheduled End", "scheduled_end"],
+  ["Resolved At", "resolved_at"],
+  ["Closed At", "closed_at"],
+  ["Age (hours)", (t) => ageHours(t)],
+  ["Description", "description"],
+  ["Resolution Note", "resolution_note"],
+];
+
+// Stored timestamps are UTC "YYYY-MM-DD HH:MM:SS" — normalise before parsing.
+const parseTs = (s) => {
+  if (!s) return null;
+  const d = new Date(/[TZ]/.test(s) ? s : String(s).replace(" ", "T") + "Z");
+  return isNaN(d.getTime()) ? null : d;
+};
+// Open tickets age until now; finished ones stop at closed/resolved.
+function ageHours(t) {
+  const from = parseTs(t.created_at);
+  if (!from) return "";
+  const to = parseTs(t.closed_at) || parseTs(t.resolved_at) || new Date();
+  return Math.max(0, Math.round(((to - from) / 3600000) * 10) / 10);
+}
+
+router.get("/api/tickets/export", requireAuth, async (req, res) => {
+  try {
+    const { where, params, orderBy } = await buildTicketListQuery(
+      req.user,
+      req.query,
+    );
+    // Outlet name via correlated subquery, not a JOIN — outlets shares column
+    // names (brand_code, region) with tickets and would make the scope clause
+    // ambiguous.
+    const rows = await db.pAll(
+      `SELECT tickets.*,
+              (SELECT COALESCE(o.name, o.display_label, tickets.outlet_code)
+                 FROM outlets o WHERE o.code = tickets.outlet_code) AS outlet_name
+         FROM tickets WHERE ${where}${orderBy}`,
+      params,
+    );
+    const headers = EXPORT_COLUMNS.map(([h]) => h);
+    const records = rows.map((t) => {
+      const rec = {};
+      for (const [h, src] of EXPORT_COLUMNS)
+        rec[h] = typeof src === "function" ? src(t) : t[src];
+      return rec;
+    });
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="tickets_${new Date().toISOString().slice(0, 10)}.csv"`,
+    );
+    res.send("﻿" + toCsv(headers, records)); // BOM so Excel reads UTF-8
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to export tickets" });
   }
 });
 

@@ -996,6 +996,12 @@ const TECH_SCOPES = [
   { value: 'unassigned_pic', label: 'Unassigned in my PIC' },
   { value: 'all', label: 'All allowed tickets' },
 ];
+// Cards (default) or the datatable view. Remembered per browser.
+let ticketView = localStorage.getItem('ticketView') === 'table' ? 'table' : 'cards';
+// Rows currently loaded, kept so the table can re-sort/paginate without refetching.
+let ticketRows = [];
+// col = null → keep the server order chosen by the toolbar's sort select.
+const dtState = { col: null, dir: 'asc', page: 1, pageSize: 25 };
 async function renderTickets() {
   // Deep-link filters (e.g. from a dashboard card → /tickets?status=New). Start
   // from a clean filter set, apply the query-string keys, then tidy the URL.
@@ -1024,6 +1030,13 @@ async function renderTickets() {
         <option value="created_asc" ${listFilters.sort === 'created_asc' ? 'selected' : ''}>Created ↑ (oldest first)</option>
         <option value="urgency" ${listFilters.sort === 'urgency' ? 'selected' : ''}>Urgency</option>
       </select>
+      <div class="toolbar-end">
+        <div class="seg" id="t-viewseg" role="group" aria-label="List view">
+          <button class="seg-b ${ticketView === 'cards' ? 'active' : ''}" data-view="cards">Cards</button>
+          <button class="seg-b ${ticketView === 'table' ? 'active' : ''}" data-view="table">Table</button>
+        </div>
+        <button class="btn-outline" id="t-export" title="Download the filtered tickets as CSV">${svg(ICONS.download, 15)} Export CSV</button>
+      </div>
     </div>
     <div id="ticket-list" class="ticket-list">${skeletonRows()}</div>`;
   $('#f-search').addEventListener('input', debounce((e) => { listFilters.search = e.target.value.trim(); loadTicketList(); }, 350));
@@ -1039,7 +1052,27 @@ async function renderTickets() {
   if (showDept) $('#f-dept').addEventListener('change', (e) => { listFilters.department = e.target.value; loadTicketList(); });
   if (showRegion) $('#f-region').addEventListener('change', (e) => { listFilters.region = e.target.value; loadTicketList(); });
   $('#f-sort').addEventListener('change', (e) => { listFilters.sort = e.target.value; loadTicketList(); });
+  $$('#t-viewseg .seg-b').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.view === ticketView) return;
+    ticketView = b.dataset.view;
+    localStorage.setItem('ticketView', ticketView);
+    $$('#t-viewseg .seg-b').forEach((x) => x.classList.toggle('active', x === b));
+    drawTicketList(); // re-render from the rows already loaded
+  }));
+  $('#t-export').addEventListener('click', exportTicketList);
   loadTicketList();
+}
+// Export = the current filter set, resolved server-side, so it covers every
+// matching ticket rather than only what is on screen.
+async function exportTicketList() {
+  const btn = $('#t-export');
+  const qs = ticketQueryString();
+  btn.disabled = true;
+  try {
+    await downloadCsv('/api/tickets/export' + (qs ? '?' + qs : ''), `tickets_${new Date().toISOString().slice(0, 10)}.csv`);
+    toast('Export downloaded', 'success');
+  } catch (e) { toast(e.message || 'Export failed', 'error'); }
+  finally { btn.disabled = false; }
 }
 // Ticket-list status filter: exact statuses (the full model, unchanged) plus a
 // "Main flow" group shortcut used by the dashboard card drill-downs.
@@ -1060,16 +1093,30 @@ function ticketsSubtitle() {
   if (r === 'Leader') return 'View-only across your scope';
   return 'Manage and respond to tickets';
 }
-async function loadTicketList() {
+function ticketQueryString() {
   const qs = new URLSearchParams();
   Object.entries(listFilters).forEach(([k, v]) => { if (v) qs.append(k, v); });
+  return qs.toString();
+}
+async function loadTicketList() {
   try {
-    const rows = await api.tickets(qs.toString());
-    const box = $('#ticket-list'); if (!box) return;
-    if (!rows.length) { box.innerHTML = emptyBox('ticket', 'No tickets', CAN_CREATE.includes(state.user.role) ? 'Tap “Report Issue” to create one.' : 'Nothing here in this scope.'); return; }
-    box.innerHTML = rows.map(ticketRow).join('');
-    $$('.ticket-row', box).forEach((el) => el.addEventListener('click', () => navigate('/tickets/' + el.dataset.id)));
+    ticketRows = await api.tickets(ticketQueryString());
+    dtState.col = null; // a new result set starts in the server's sort order
+    dtState.page = 1;
+    drawTicketList();
   } catch (e) { const box = $('#ticket-list'); if (box) box.innerHTML = errBox(e); }
+}
+// Renders whatever is in `ticketRows` in the active view.
+function drawTicketList() {
+  const box = $('#ticket-list'); if (!box) return;
+  box.classList.toggle('ticket-list', ticketView === 'cards');
+  if (!ticketRows.length) {
+    box.innerHTML = emptyBox('ticket', 'No tickets', CAN_CREATE.includes(state.user.role) ? 'Tap “Report Issue” to create one.' : 'Nothing here in this scope.');
+    return;
+  }
+  if (ticketView === 'table') return drawTicketTable(box);
+  box.innerHTML = ticketRows.map(ticketRow).join('');
+  $$('.ticket-row', box).forEach((el) => el.addEventListener('click', () => navigate('/tickets/' + el.dataset.id)));
 }
 function ticketRow(t) {
   const sched = t.status === 'On Scheduled' && t.scheduled_at ? `<span class="sched-chip">📅 ${fmtDate(t.scheduled_at)}</span>` : '';
@@ -1083,6 +1130,108 @@ function ticketRow(t) {
     </div>
     <div class="tbadges">${urgBadge(t.urgency)}${badge(t.status)}</div>
   </div>`;
+}
+
+// --------------------------------------------------------------------------
+// Datatable view — same rows as the cards, laid out as a sortable, paginated
+// table. `cell` renders the HTML; `val` is what the column sorts on (a number
+// sorts numerically, anything else as a lowercased string).
+// --------------------------------------------------------------------------
+const URG_RANK = { Critical: 1, High: 2, Medium: 3, Low: 4 };
+// Sortable epoch ms. Timestamps arrive either as SQLite "YYYY-MM-DD HH:MM:SS"
+// (UTC) or as a full ISO string — same normalisation fmtDate() uses.
+const tsOf = (s) => {
+  if (!s) return 0;
+  const d = new Date(s.includes('T') || s.includes('Z') ? s : s.replace(' ', 'T') + 'Z');
+  return d.getTime() || 0;
+};
+const DT_COLUMNS = [
+  { key: 'ticket_number', label: 'Ticket', val: (t) => t.ticket_number || '#' + t.id, cell: (t) => `<span class="dt-num">${esc(t.ticket_number || '#' + t.id)}</span>${t.source === 'public_quick_report' ? '<span class="src-chip">Public</span>' : ''}` },
+  { key: 'title', label: 'Subject', val: (t) => t.title || '', cell: (t) => `<span class="dt-subject">${esc(t.title || '')}</span>` },
+  { key: 'department', label: 'Dept', val: (t) => t.department || '', cell: (t) => deptTag(t.department) },
+  { key: 'category', label: 'Category', val: (t) => t.category || '', cell: (t) => esc(t.category || '—') },
+  { key: 'outlet_code', label: 'Outlet', val: (t) => t.outlet_code || '', cell: (t) => esc(t.outlet_code || '—') },
+  { key: 'region', label: 'Region', val: (t) => t.region || '', cell: (t) => esc(t.region || '—') },
+  { key: 'status', label: 'Status', val: (t) => t.status || '', cell: (t) => badge(t.status) },
+  { key: 'urgency', label: 'Urgency', val: (t) => URG_RANK[t.urgency] || 9, cell: (t) => urgBadge(t.urgency) },
+  { key: 'customer_name', label: 'Requestor', val: (t) => t.customer_name || '', cell: (t) => esc(t.customer_name || '—') },
+  { key: 'assignee_name', label: 'Assignee', val: (t) => (t.assignee_name === 'Unassigned' ? '' : t.assignee_name || ''), cell: (t) => (t.assignee_name && t.assignee_name !== 'Unassigned' ? esc(t.assignee_name) : '<span class="muted">Unassigned</span>') },
+  { key: 'created_at', label: 'Created', val: (t) => tsOf(t.created_at), cell: (t) => `<span class="dt-nowrap">${esc(fmtDate(t.created_at))}</span>` },
+  { key: 'age', label: 'Age', val: (t) => -tsOf(t.created_at), cell: (t) => `<span class="aging ${agingClass(t)}">${esc(timeAgo(t.created_at))}</span>` },
+];
+const DT_PAGE_SIZES = [25, 50, 100, 0]; // 0 = all
+
+function dtSortedRows() {
+  if (!dtState.col) return ticketRows;
+  const col = DT_COLUMNS.find((c) => c.key === dtState.col);
+  if (!col) return ticketRows;
+  const sign = dtState.dir === 'desc' ? -1 : 1;
+  // slice() so the sort never mutates the fetched order the server sent.
+  return ticketRows.slice().sort((a, b) => {
+    let x = col.val(a), y = col.val(b);
+    if (typeof x !== 'number' || typeof y !== 'number') {
+      x = String(x).toLowerCase(); y = String(y).toLowerCase();
+      // Blanks always sink to the bottom, whichever direction is active.
+      if (x !== y && (!x || !y)) return !x ? 1 : -1;
+    }
+    return x < y ? -sign : x > y ? sign : 0;
+  });
+}
+
+function drawTicketTable(box) {
+  const rows = dtSortedRows();
+  const size = dtState.pageSize || rows.length;
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  dtState.page = Math.min(Math.max(1, dtState.page), pages);
+  const from = (dtState.page - 1) * size;
+  const page = rows.slice(from, from + size);
+  const arrow = (c) => (dtState.col === c.key ? (dtState.dir === 'asc' ? '▲' : '▼') : '▲');
+  box.innerHTML = `
+    <div class="panel dt-panel">
+      <div class="table-wrap">
+        <table class="data dt">
+          <thead><tr>${DT_COLUMNS.map((c) => `
+            <th class="dt-sortable ${dtState.col === c.key ? 'dt-on' : ''}" data-col="${c.key}" tabindex="0" role="button"
+                aria-sort="${dtState.col === c.key ? (dtState.dir === 'asc' ? 'ascending' : 'descending') : 'none'}">
+              ${esc(c.label)}<span class="dt-arrow">${arrow(c)}</span>
+            </th>`).join('')}</tr></thead>
+          <tbody>${page.map((t) => `
+            <tr class="dt-row" data-id="${t.id}" tabindex="0">
+              ${DT_COLUMNS.map((c) => `<td>${c.cell(t)}</td>`).join('')}
+            </tr>`).join('')}</tbody>
+        </table>
+      </div>
+      <div class="dt-foot">
+        <span class="muted">Showing ${rows.length ? from + 1 : 0}–${from + page.length} of ${rows.length} ticket${rows.length === 1 ? '' : 's'}</span>
+        <div class="dt-foot-right">
+          <label class="dt-size">Rows
+            <select id="dt-size">${DT_PAGE_SIZES.map((n) => `<option value="${n}" ${dtState.pageSize === n ? 'selected' : ''}>${n || 'All'}</option>`).join('')}</select>
+          </label>
+          <button class="btn-outline dt-pg" id="dt-prev" ${dtState.page <= 1 ? 'disabled' : ''}>‹ Prev</button>
+          <span class="muted dt-nowrap">Page ${dtState.page} / ${pages}</span>
+          <button class="btn-outline dt-pg" id="dt-next" ${dtState.page >= pages ? 'disabled' : ''}>Next ›</button>
+        </div>
+      </div>
+    </div>`;
+  $$('.dt-sortable', box).forEach((th) => {
+    const sort = () => {
+      // Same column → flip direction; new column → start ascending.
+      if (dtState.col === th.dataset.col) dtState.dir = dtState.dir === 'asc' ? 'desc' : 'asc';
+      else { dtState.col = th.dataset.col; dtState.dir = 'asc'; }
+      dtState.page = 1;
+      drawTicketTable(box);
+    };
+    th.addEventListener('click', sort);
+    th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sort(); } });
+  });
+  $$('.dt-row', box).forEach((tr) => {
+    const go = () => navigate('/tickets/' + tr.dataset.id);
+    tr.addEventListener('click', go);
+    tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  });
+  $('#dt-size').addEventListener('change', (e) => { dtState.pageSize = Number(e.target.value); dtState.page = 1; drawTicketTable(box); });
+  $('#dt-prev').addEventListener('click', () => { dtState.page--; drawTicketTable(box); });
+  $('#dt-next').addEventListener('click', () => { dtState.page++; drawTicketTable(box); });
 }
 
 // ==========================================================================
@@ -2956,7 +3105,10 @@ async function renderImportExport() {
 }
 // Export downloads via rawFetch (keeps cookie auth + 401 re-auth), then saves the blob.
 async function downloadExport(module, filename) {
-  const res = await rawFetch('/api/export/' + module, { method: 'GET' });
+  return downloadCsv('/api/export/' + module, filename);
+}
+async function downloadCsv(endpoint, filename) {
+  const res = await rawFetch(endpoint, { method: 'GET' });
   if (!res.ok) { let m = 'Export failed'; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(m); }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);

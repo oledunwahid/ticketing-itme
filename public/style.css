@@ -219,6 +219,35 @@ textarea { resize: vertical; min-height: 90px; }
 .ticket-row .ttitle { font-weight: 600; margin: 2px 0; word-break: break-word; }
 .ticket-row .tmeta { font-size: 0.77rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .ticket-row .tbadges { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+
+/* --- Ticket datatable view (Cards / Table toggle + export) --- */
+.toolbar-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.toolbar-end .btn-outline { padding: 8px 13px; font-size: 0.84rem; }
+.dt-panel { padding: 0; }
+table.data.dt { min-width: 1120px; }
+table.data.dt th.dt-sortable { cursor: pointer; user-select: none; white-space: nowrap; transition: color .15s; }
+table.data.dt th.dt-sortable:hover { color: var(--text); }
+table.data.dt th.dt-sortable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+table.data.dt th.dt-on { color: var(--text); }
+.dt-arrow { margin-left: 5px; font-size: 0.62em; opacity: .3; }
+th.dt-on .dt-arrow { opacity: 1; color: var(--primary); }
+table.data.dt tr.dt-row { cursor: pointer; }
+table.data.dt tr.dt-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+table.data.dt td { vertical-align: middle; }
+.dt-num { font-size: 0.76rem; font-weight: 700; color: var(--primary); white-space: nowrap; }
+.dt-subject { display: block; max-width: 320px; font-weight: 600; }
+.dt-nowrap { white-space: nowrap; }
+.dt-foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 11px 14px; border-top: 1px solid var(--border);
+  background: var(--surface-2); font-size: 0.8rem;
+}
+.dt-foot-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dt-size { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
+.dt-size select { width: auto; min-width: 74px; padding: 6px 8px; font-size: 0.8rem; }
+.btn-outline.dt-pg { padding: 6px 11px; font-size: 0.8rem; }
+.btn-outline.dt-pg:disabled { opacity: .4; cursor: not-allowed; }
+
 .dept-tag { font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 6px; letter-spacing: .03em; }
 .dept-IT { background: rgba(59,130,246,.18); color: #60a5fa; }
 .dept-ME { background: rgba(245,158,11,.18); color: #fbbf24; }
@@ -537,6 +566,11 @@ table.data tr:hover td { background: var(--surface-2); }
   .bn-item svg { width: 21px; height: 21px; }
   .bn-item.active { color: var(--primary); }
   .toolbar select, .toolbar .search { min-width: 0; flex: 1 1 140px; }
+  /* View toggle + export take their own row and share it evenly on phones. */
+  .toolbar-end { margin-left: 0; width: 100%; }
+  .toolbar-end .seg, .toolbar-end .btn-outline { flex: 1; justify-content: center; }
+  .dt-foot { justify-content: center; }
+  .dt-foot-right { justify-content: center; width: 100%; }
   /* Thumb-sized status action: this is the control technicians use in the field. */
   .side-panel #act-status, .side-panel #act-apply { padding: 14px; font-size: 1rem; }
   /* Row actions stay icon-only and on one line; the target grows to 40px so it

@@ -33,6 +33,11 @@ const LOCATION_HEADERS = ["code", "name", "brand_code", "region", "active"];
 const SCHEDULE_HEADERS = ["technician_email", "day_of_week", "start_time", "end_time", "active"];
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const MAX_ROWS = 5000;
+const dupe = (seen, key, rowNum, label) => {
+  if (seen.has(key)) throw new Error(`duplicate ${label} (also on row ${seen.get(key)})`);
+  seen.set(key, rowNum);
+};
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const truthy = (v) => /^(1|true|yes|active|y)$/i.test(String(v).trim());
 const boolCell = (v, dflt) =>
@@ -101,6 +106,8 @@ async function handleImport(req, res, moduleName, requiredHeaders, validateRow, 
     const dryRun = !!(req.body && req.body.dryRun) || req.query.dryRun === "1";
     if (!csv.trim()) return res.status(400).json({ error: "No CSV content provided" });
 
+    if (csv.length > 2 * 1024 * 1024)
+      return res.status(413).json({ error: "CSV is too large (max 2 MB)." });
     const { headers, rows } = parseCsv(csv);
     const missing = requiredHeaders.filter((h) => !headers.includes(h));
     if (missing.length)
@@ -108,13 +115,16 @@ async function handleImport(req, res, moduleName, requiredHeaders, validateRow, 
         .status(400)
         .json({ error: `Missing required column(s): ${missing.join(", ")}` });
     if (!rows.length) return res.status(400).json({ error: "No data rows found" });
+    if (rows.length > MAX_ROWS)
+      return res.status(400).json({ error: `Too many rows (${rows.length}). Split the file into batches of ${MAX_ROWS}.` });
 
     const errors = [];
     const prepared = [];
+    const seen = new Map(); // duplicate keys within the same file
     for (let idx = 0; idx < rows.length; idx++) {
       const rowNum = idx + 2; // +1 for header line, +1 for 1-based
       try {
-        prepared.push(await validateRow(rows[idx], rowNum));
+        prepared.push(await validateRow(rows[idx], rowNum, req.user, seen));
       } catch (e) {
         errors.push({ row: rowNum, message: e.message || String(e) });
       }
@@ -139,22 +149,19 @@ async function handleImport(req, res, moduleName, requiredHeaders, validateRow, 
       return res.status(400).json({
         module: moduleName,
         dryRun: false,
-        error: "Import rejected — fix the invalid row(s) and try again.",
+        error: "Import rejected. Fix the invalid row(s) and try again.",
         summary,
         errors,
         preview,
       });
 
-    await db.pExec("BEGIN");
     try {
-      await applyRows(prepared);
-      await db.pExec("COMMIT");
+      await db.transaction(() => applyRows(prepared));
     } catch (e) {
-      try { await db.pExec("ROLLBACK"); } catch (_) {}
       console.error(e);
       return res
         .status(500)
-        .json({ error: "Import failed and was rolled back: " + e.message });
+        .json({ error: "Import failed and was rolled back. Nothing was changed." });
     }
     summary.applied = prepared.length;
     res.json({ module: moduleName, dryRun: false, summary, errors: [], preview });
@@ -165,27 +172,43 @@ async function handleImport(req, res, moduleName, requiredHeaders, validateRow, 
 }
 
 // --- Users (update existing by email) --------------------------------------
-async function validateUserRow(r) {
+async function validateUserRow(r, rowNum, actor, seen) {
   const email = (r.email || "").toLowerCase().trim();
   if (!email) throw new Error("email is required");
   if (!EMAIL_RE.test(email)) throw new Error(`invalid email "${email}"`);
+  dupe(seen, "e:" + email, rowNum, `email "${email}"`);
   const existing = await db.pGet("SELECT id, role FROM users WHERE LOWER(email) = ?", [email]);
   if (!existing)
     throw new Error(
       `no existing user with email "${email}" (import updates existing users; create new users on the Users page)`,
     );
+  const isSelf = existing.id === actor.id;
   const set = {};
-  if (r.username) set.username = r.username;
-  if (r.role) {
+  if (r.username) {
+    const name = r.username.trim().slice(0, 120);
+    const clash = await db.pGet("SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?", [name, existing.id]);
+    if (clash) throw new Error(`username "${name}" is already used by another account`);
+    dupe(seen, "u:" + name.toLowerCase(), rowNum, `username "${name}"`);
+    set.username = name;
+  }
+  if (r.role && r.role !== existing.role) {
     if (!db.APP_ROLES.includes(r.role)) throw new Error(`invalid role "${r.role}"`);
+    if (isSelf) throw new Error("you cannot change your own role by import");
     set.role = r.role;
     set.department = deptForRole(r.role);
-  } else if (r.department) {
-    set.department = r.department;
+  } else if (r.department && !r.role) {
+    if (!["IT", "ME"].includes(r.department.toUpperCase()))
+      throw new Error(`department must be IT or ME (got "${r.department}")`);
+    set.department = r.department.toUpperCase();
   }
-  if (r.phone !== undefined && r.phone !== "") set.phone = r.phone;
-  if (r.is_active !== undefined && r.is_active !== "")
+  if (r.phone !== undefined && r.phone !== "") {
+    if (!/^\+?[\d\s().-]{8,25}$/.test(r.phone)) throw new Error(`invalid phone "${r.phone}"`);
+    set.phone = r.phone;
+  }
+  if (r.is_active !== undefined && r.is_active !== "") {
     set.is_active = boolCell(r.is_active, 1);
+    if (isSelf && !set.is_active) throw new Error("you cannot deactivate your own account by import");
+  }
   if (!Object.keys(set).length) throw new Error("no updatable fields provided");
   return { _action: "update", id: existing.id, set, display: { email, ...set } };
 }
@@ -196,28 +219,35 @@ async function applyUserRows(prepared) {
       `UPDATE users SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
       [...cols.map((c) => p.set[c]), p.id],
     );
+    // Role change or deactivation signs the user out everywhere.
+    if (p.set.role || p.set.is_active === 0)
+      await db.pRun("UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", [p.id]);
   }
 }
 
 // --- Locations / outlets (upsert by code) ----------------------------------
-async function validateLocationRow(r) {
-  const code = (r.code || "").trim();
+async function validateLocationRow(r, rowNum, actor, seen) {
+  const code = (r.code || "").trim().toUpperCase();
   if (!code) throw new Error("code is required");
-  const name = (r.name || "").trim() || code;
-  const brand_code = (r.brand_code || "").trim();
+  if (!/^[A-Z0-9][A-Z0-9_.-]{0,29}$/.test(code))
+    throw new Error(`code "${code}" may only use letters, numbers and - _ .`);
+  dupe(seen, code, rowNum, `code "${code}"`);
+  const name = ((r.name || "").trim() || code).slice(0, 100);
+  const brand_code = (r.brand_code || "").trim().toUpperCase().slice(0, 30);
   if (!brand_code) throw new Error(`brand_code is required for "${code}"`);
-  const region = (r.region || "").trim() || "Jakarta";
+  const region = ((r.region || "").trim() || "Jakarta").slice(0, 40);
   const active = boolCell(r.active, 1);
-  const existing = await db.pGet("SELECT id FROM outlets WHERE code = ?", [code]);
+  const existing = await db.pGet("SELECT id FROM outlets WHERE UPPER(code) = ?", [code]);
   const data = { code, name, brand_code, region, active };
   return { _action: existing ? "update" : "insert", data, display: data };
 }
 async function applyLocationRows(prepared) {
   for (const p of prepared) {
     const d = p.data;
+    await db.pRun("INSERT OR IGNORE INTO brands (code, name) VALUES (?, ?)", [d.brand_code, d.brand_code]);
     if (p._action === "update") {
       await db.pRun(
-        "UPDATE outlets SET name = ?, brand_code = ?, region = ?, active = ? WHERE code = ?",
+        "UPDATE outlets SET name = ?, brand_code = ?, region = ?, active = ? WHERE UPPER(code) = ?",
         [d.name, d.brand_code, d.region, d.active, d.code],
       );
     } else {
@@ -230,7 +260,7 @@ async function applyLocationRows(prepared) {
 }
 
 // --- Schedules (upsert by technician + day + start + end) ------------------
-async function validateScheduleRow(r) {
+async function validateScheduleRow(r, rowNum, actor, seen) {
   const email = (r.technician_email || "").toLowerCase().trim();
   if (!email) throw new Error("technician_email is required");
   const user = await db.pGet("SELECT id, role FROM users WHERE LOWER(email) = ?", [email]);
@@ -245,6 +275,7 @@ async function validateScheduleRow(r) {
   if (!TIME_RE.test(start)) throw new Error(`start_time must be HH:MM (got "${start}")`);
   if (!TIME_RE.test(end)) throw new Error(`end_time must be HH:MM (got "${end}")`);
   if (end <= start) throw new Error(`end_time must be after start_time (${start}-${end})`);
+  dupe(seen, `${user.id}|${dow}|${start}|${end}`, rowNum, "schedule");
   const active = boolCell(r.active, 1);
   const existing = await db.pGet(
     "SELECT id FROM technician_schedules WHERE user_id = ? AND day_of_week = ? AND start_time = ? AND end_time = ?",

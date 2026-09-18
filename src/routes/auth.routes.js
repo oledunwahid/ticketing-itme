@@ -1,8 +1,10 @@
 /* ==========================================================================
    Routes — Auth (/api/auth/*)
-   Verbatim move of the auth route handlers from app.js. URLs, middleware
-   order, validation and response shapes are unchanged. Mounted at "/" so the
-   full "/api/auth/..." paths are preserved.
+     POST /api/auth/login            (rate-limited on failures, lockout)
+     POST /api/auth/logout
+     GET  /api/auth/me
+     POST /api/auth/change-password  (signs out every other session)
+     POST /api/auth/register         (legacy; admin-only, creates a Requestor)
    ========================================================================== */
 const express = require("express");
 const bcrypt = require("bcryptjs");
@@ -11,81 +13,58 @@ const {
   rateLimit,
   signToken,
   setSessionCookie,
+  clearSessionCookie,
   requireAuth,
   requireRole,
+  publicUser,
+  bumpTokenVersion,
 } = require("../middleware/auth");
+const { validatePassword, EMAIL_RE } = require("../utils/validate");
 
 const router = express.Router();
 
-// Public self-registration is DISABLED. Accounts are created only by
-// SuperAdmin/Admin via User Management (POST /api/users). This legacy endpoint
-// is kept but locked behind admin auth so no unauthenticated user can register.
+// A real bcrypt hash of a random string: comparing against it when the email
+// is unknown keeps the response time the same as for a wrong password.
+const DUMMY_HASH = bcrypt.hashSync(require("crypto").randomBytes(16).toString("hex"), 10);
+const LOCK_AFTER = 5;
+const LOCK_MS = 15 * 60 * 1000;
+
+// Public self-registration is DISABLED. Accounts are created only by admins via
+// User Management (POST /api/users). This legacy endpoint stays admin-only.
 router.post(
   "/api/auth/register",
   requireAuth,
   requireRole("SuperAdmin", "AdminIT", "AdminME"),
   async (req, res) => {
     try {
-      const {
-        username,
-        email,
-        password,
-        passwordConfirm,
-        brand,
-        outlet,
-        phone,
-      } = req.body;
-      if (!username || !email || !password || !passwordConfirm) {
+      const { username, email, password, passwordConfirm, brand, outlet, phone } = req.body || {};
+      if (!username || !email || !password || !passwordConfirm)
         return res.status(400).json({ error: "All fields are required" });
-      }
       if (password !== passwordConfirm)
         return res.status(400).json({ error: "Passwords do not match" });
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email))
+      if (!EMAIL_RE.test(String(email)))
         return res.status(400).json({ error: "Invalid email address format" });
-      const passwordRegex =
-        /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
-      if (!passwordRegex.test(password))
-        return res
-          .status(400)
-          .json({ error: "Password does not meet complexity requirements" });
+      const pwErr = validatePassword(password);
+      if (pwErr) return res.status(400).json({ error: pwErr });
 
       const existing = await db.pGet(
         "SELECT id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)",
         [email, username],
       );
       if (existing)
-        return res
-          .status(400)
-          .json({ error: "Username or email already in use" });
+        return res.status(400).json({ error: "Username or email already in use" });
 
-      const passwordHash = bcrypt.hashSync(password, 10);
-      // Self-registration always creates a Requestor.
+      const passwordHash = await bcrypt.hash(password, 10);
       const r = await db.pRun(
         `INSERT INTO users (username, email, password_hash, role, brand, default_outlet_code, phone)
-       VALUES (?, ?, ?, 'Requestor', ?, ?, ?)`,
-        [
-          username,
-          email.toLowerCase(),
-          passwordHash,
-          brand || null,
-          outlet || null,
-          phone || null,
-        ],
+         VALUES (?, ?, ?, 'Requestor', ?, ?, ?)`,
+        [String(username).trim(), String(email).toLowerCase().trim(), passwordHash, brand || null, outlet || null, phone || null],
       );
       if (brand)
-        await db.pRun(
-          "INSERT OR IGNORE INTO user_brand_access (user_id, brand_code) VALUES (?, ?)",
-          [r.lastID, brand],
-        );
+        await db.pRun("INSERT OR IGNORE INTO user_brand_access (user_id, brand_code) VALUES (?, ?)", [r.lastID, brand]);
       if (outlet)
-        await db.pRun(
-          "INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)",
-          [r.lastID, outlet],
-        );
-      res
-        .status(201)
-        .json({ message: "Registration successful! Please log in." });
+        await db.pRun("INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)", [r.lastID, outlet]);
+      res.status(201).json({ message: "Registration successful! Please log in." });
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Failed to register user" });
@@ -95,139 +74,106 @@ router.post(
 
 router.post(
   "/api/auth/login",
-  rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }),
+  // Only failures count, so a whole outlet signing in from one NAT'd IP is fine.
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 20, skipSuccessful: true }),
   async (req, res) => {
     try {
-      const { email, password } = req.body;
-      if (!email || !password)
-        return res
-          .status(400)
-          .json({ error: "Email and password are required" });
+      const { email, password } = req.body || {};
+      if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password)
+        return res.status(400).json({ error: "Email and password are required" });
+      if (email.length > 254 || password.length > 256)
+        return res.status(400).json({ error: "Invalid email or password" });
 
-      const user = await db.pGet(
-        "SELECT * FROM users WHERE LOWER(email) = LOWER(?)",
-        [email],
-      );
-      // Generic error to avoid user enumeration.
+      const user = await db.pGet("SELECT * FROM users WHERE LOWER(email) = LOWER(?)", [email.trim()]);
       const GENERIC = "Invalid email or password";
-      if (!user) return res.status(401).json({ error: GENERIC });
-
-      // Account lockout check
-      if (user.locked_until && new Date(user.locked_until) > new Date()) {
-        return res
-          .status(423)
-          .json({
-            error:
-              "Account temporarily locked due to failed attempts. Try again later.",
-          });
-      }
-      if (user.is_active === 0)
-        return res
-          .status(403)
-          .json({ error: "Account is inactive. Contact an administrator." });
-
-      if (!bcrypt.compareSync(password, user.password_hash)) {
-        const attempts = (user.failed_attempts || 0) + 1;
-        const lockFor =
-          attempts >= 5
-            ? new Date(Date.now() + 15 * 60 * 1000).toISOString()
-            : null;
-        await db.pRun(
-          "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?",
-          [attempts, lockFor, user.id],
-        );
+      if (!user) {
+        await bcrypt.compare(password, DUMMY_HASH);
         return res.status(401).json({ error: GENERIC });
       }
 
-      // Success — reset lockout counters.
+      if (user.locked_until && new Date(user.locked_until) > new Date()) {
+        const mins = Math.max(1, Math.ceil((new Date(user.locked_until) - Date.now()) / 60000));
+        return res.status(423).json({
+          error: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`,
+        });
+      }
+
+      const ok = await bcrypt.compare(password, user.password_hash);
+      if (!ok) {
+        const attempts = (user.failed_attempts || 0) + 1;
+        const lockFor = attempts >= LOCK_AFTER ? new Date(Date.now() + LOCK_MS).toISOString() : null;
+        await db.pRun(
+          "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?",
+          [lockFor ? 0 : attempts, lockFor, user.id],
+        );
+        return res.status(401).json({ error: GENERIC });
+      }
+      // Checked only after the password, so this does not reveal which emails exist.
+      if (user.is_active === 0)
+        return res.status(403).json({ error: "Account is inactive. Contact an administrator." });
+
       await db.pRun(
-        "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?",
+        "UPDATE users SET failed_attempts = 0, locked_until = NULL, last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
         [user.id],
       );
-      const rememberMe =
-        req.body.remember_me === true ||
-        req.body.remember_me === "true" ||
-        req.body.rememberMe === true;
-      const token = signToken(user, rememberMe);
-      setSessionCookie(res, token, rememberMe);
-      res.json({
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        department: user.department,
-        brand: user.brand,
-        all_brands: user.all_brands,
-        can_close_override: user.can_close_override,
-      });
+      const b = req.body;
+      const rememberMe = b.remember_me === true || b.remember_me === "true" || b.rememberMe === true;
+      setSessionCookie(res, signToken(user, rememberMe), rememberMe);
+      res.json(publicUser(user));
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: "Database error" });
+      res.status(500).json({ error: "Sign-in is temporarily unavailable." });
     }
   },
 );
 
 router.post("/api/auth/logout", (req, res) => {
-  res.clearCookie("token");
+  clearSessionCookie(res);
   res.json({ success: true, message: "Logged out successfully" });
 });
 
 router.get("/api/auth/me", requireAuth, (req, res) => {
-  res.json({
-    id: req.user.id,
-    username: req.user.username,
-    email: req.user.email,
-    role: req.user.role,
-    department: req.user.department,
-    brand: req.user.brand,
-    all_brands: req.user.all_brands,
-    can_close_override: req.user.can_close_override,
-  });
+  res.json(publicUser(req.user));
 });
 
-router.post("/api/auth/change-password", requireAuth, async (req, res) => {
-  try {
-    const { oldPassword, newPassword, confirmPassword } = req.body || {};
-    const oldPw = oldPassword || req.body.old_password;
-    const newPw = newPassword || req.body.new_password;
-    const confirmPw = confirmPassword || req.body.confirm_password;
+router.post(
+  "/api/auth/change-password",
+  requireAuth,
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 10, skipSuccessful: true }),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const oldPw = body.oldPassword || body.old_password;
+      const newPw = body.newPassword || body.new_password;
+      const confirmPw = body.confirmPassword || body.confirm_password;
 
-    if (!oldPw || !newPw || !confirmPw) {
-      return res
-        .status(400)
-        .json({ error: "Current password, new password, and confirmation are required." });
+      if (!oldPw || !newPw || !confirmPw)
+        return res.status(400).json({ error: "Current password, new password, and confirmation are required." });
+      if (newPw !== confirmPw)
+        return res.status(400).json({ error: "New password and confirmation do not match." });
+      if (newPw === oldPw)
+        return res.status(400).json({ error: "The new password must be different from the current one." });
+      const pwErr = validatePassword(newPw);
+      if (pwErr) return res.status(400).json({ error: pwErr });
+
+      const user = await db.pGet("SELECT id, password_hash FROM users WHERE id = ?", [req.user.id]);
+      if (!user || !(await bcrypt.compare(String(oldPw), user.password_hash)))
+        return res.status(400).json({ error: "Incorrect current password." });
+
+      await db.pRun("UPDATE users SET password_hash = ? WHERE id = ?", [
+        await bcrypt.hash(newPw, 10),
+        req.user.id,
+      ]);
+      // Sign out every other device, then re-issue this session on the new version.
+      await bumpTokenVersion(req.user.id);
+      const fresh = await db.pGet("SELECT id, token_version FROM users WHERE id = ?", [req.user.id]);
+      setSessionCookie(res, signToken(fresh, false), false);
+      res.json({ success: true, message: "Password updated. Other devices have been signed out." });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to update password." });
     }
-    if (newPw !== confirmPw) {
-      return res.status(400).json({ error: "New password and confirmation do not match." });
-    }
-
-    const passwordRegex =
-      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{10,}$/;
-    if (!passwordRegex.test(newPw)) {
-      return res.status(400).json({
-        error:
-          "New password must be at least 10 characters long, with uppercase, lowercase, numbers, and special characters.",
-      });
-    }
-
-    const user = await db.pGet("SELECT id, password_hash FROM users WHERE id = ?", [
-      req.user.id,
-    ]);
-    if (!user || !bcrypt.compareSync(oldPw, user.password_hash)) {
-      return res.status(400).json({ error: "Incorrect current password." });
-    }
-
-    const newHash = bcrypt.hashSync(newPw, 10);
-    await db.pRun("UPDATE users SET password_hash = ? WHERE id = ?", [
-      newHash,
-      req.user.id,
-    ]);
-
-    res.json({ success: true, message: "Password updated successfully." });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to update password." });
-  }
-});
+  },
+);
 
 module.exports = router;

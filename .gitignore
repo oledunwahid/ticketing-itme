@@ -1,18 +1,26 @@
 # Dependencies
 node_modules/
 
-# Database (local/dev data — do not track)
+# Database (local/prod data — never track, never push)
 tickets.db
 tickets.db-journal
 tickets.db-wal
 tickets.db-shm
+tickets.db.bak*
+*.db
 *.sqlite
 *.sqlite3
+backups/
 
 # Uploaded user content
 uploads/*
 !uploads/.gitkeep
 !uploads/temp/.gitkeep
+
+# Data exports that may contain personal data or password hashes
+users_with_hashes.csv
+*_with_hashes.csv
+exports/
 
 # Environment / secrets
 .env
@@ -28,3 +36,4 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+coverage/

@@ -24,9 +24,21 @@ Create or configure `.env` in the root directory:
 | `PORT` | HTTP listening port | `3001` |
 | `HOST` | Binding IP interface (`0.0.0.0` allows local network access) | `0.0.0.0` |
 | `DB_PATH` | Absolute or relative path to SQLite database file | `./tickets.db` |
-| `JWT_SECRET` | Secret key for signing JWT auth cookies (**Required in production**) | `replace-with-a-long-random-secret` |
+| `JWT_SECRET` | Secret for signing session tokens (**required in production**, 32+ random chars) | `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `APP_URL` | Public URL used in WhatsApp links; its scheme also sets the cookie `Secure` flag | `http://192.168.1.100:3001` |
+| `COOKIE_SECURE` | Force the cookie `Secure` flag (only needed behind an HTTPS proxy) | *(auto from APP_URL)* |
+| `TRUST_PROXY` | Set when a reverse proxy is in front so rate limits see real IPs | `1` |
+| `CORS_ORIGINS` | Extra origins allowed to call the API (same-origin needs nothing) | *(empty)* |
+| `UPLOADS_DIR` | Where attachments are stored | `./uploads` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | First start on an **empty** DB: create this SuperAdmin instead of demo accounts | *(empty)* |
 | `EMAIL_ENABLED` | Enable email notifications (`true`/`false`) | `false` |
-| `FONNTE_ENABLED`| Enable WhatsApp notifications via Fonnte (`true`/`false`) | `false` |
+| `FONNTE_ENABLED`| WhatsApp via Fonnte; sends only when `FONNTE_TOKEN` is set and this is not `false` | `false` |
+| `FONNTE_TOKEN` | Fonnte API token (**never commit it**) | *(empty)* |
+| `FONNTE_WA_GROUP` / `_IT` / `_ME` | Technician WhatsApp group ids (`…@g.us`) | *(empty)* |
+
+> **Plain HTTP on the LAN is supported.** The session cookie is only marked `Secure`
+> when `APP_URL` starts with `https://` (or `COOKIE_SECURE=true`); otherwise browsers
+> would silently drop it and nobody could sign in.
 
 ---
 
@@ -106,10 +118,10 @@ To run the application reliably on a Synology NAS using Container Manager:
 
 2. **Dockerfile**:
    ```dockerfile
-   FROM node:18-alpine
+   FROM node:20-alpine
    WORKDIR /app
    COPY package*.json ./
-   RUN npm ci --only=production
+   RUN npm ci --omit=dev
    COPY . .
    EXPOSE 3001
    ENV NODE_ENV=production
@@ -134,7 +146,9 @@ To run the application reliably on a Synology NAS using Container Manager:
          - PORT=3001
          - HOST=0.0.0.0
          - DB_PATH=/app/data/tickets.db
-         - JWT_SECRET=synology-prod-secret-key-12345
+         - JWT_SECRET=${JWT_SECRET}          # put the real value in .env, not here
+         - APP_URL=http://<SYNOLOGY_IP>:3001
+         - UPLOADS_DIR=/app/uploads
        volumes:
          - /volume1/docker/itme-ticketing/data:/app/data
          - /volume1/docker/itme-ticketing/uploads:/app/uploads
@@ -175,3 +189,24 @@ To run the application reliably on a Synology NAS using Container Manager:
 
 4. **Uploaded attachments missing after container restart**:
    - Ensure `/app/uploads` and `/app/data` are mounted to persistent host volumes.
+
+5. **Everyone gets "Too many attempts" at once**:
+   - A reverse proxy is hiding client IPs. Set `TRUST_PROXY=1`. (Only *failed* sign-ins count towards the limit.)
+
+6. **Users are signed out after a password reset / role change**:
+   - Expected: changing a password, role or deactivating an account revokes that user's sessions immediately.
+
+## 5. Health check & verification
+
+- `GET /api/health` → `{"ok":true}` (no auth, no data) — use it for uptime monitoring.
+- Before deploying a new version: `npm ci && npm run check` (ESLint + API test suite on a throw-away database).
+
+## 6. Backups
+
+SQLite runs in WAL mode. Back up with a consistent snapshot instead of copying the file while the app writes:
+
+```bash
+node -e "const s=require('sqlite3');new s.Database('tickets.db').run(\"VACUUM INTO 'backups/tickets-'||strftime('%Y%m%d-%H%M','now')||'.db'\")"
+```
+
+Back up the `uploads/` folder alongside it. Keep backups **out of git** (`backups/` is ignored).

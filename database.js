@@ -723,25 +723,13 @@ async function runMigrations() {
     `);
   });
 
-  // m016 — Seed user Edi (TechnicianIT)
-  await migrate('m016_seed_edi_user', async () => {
-    const existing = await get("SELECT id FROM users WHERE LOWER(username) = 'edi' OR LOWER(email) = 'edi@union.com'");
-    if (!existing) {
-      const pw = bcrypt.hashSync('Password123!', 10);
-      await run(
-        `INSERT INTO users (username, email, password_hash, role, department, all_brands, all_outlets, region, pic_area, is_active)
-         VALUES ('Edi', 'edi@union.com', ?, 'TechnicianIT', 'IT', 1, 1, 'Jakarta', 'IT Area', 1)`,
-        [pw]
-      );
-    }
-  });
+  // m016 (seed user Edi) removed: Edi is now a demo account created by
+  // seedIfEmpty() only, never on production installs.
 }
 
 // --- Demo seed (fresh installs only) --------------------------------------
 async function seedIfEmpty() {
-  // m016 inserts one technician during migrations, so "empty" means: no
-  // account other than that one.
-  const row = await get("SELECT COUNT(*) AS count FROM users WHERE LOWER(email) != 'edi@union.com'");
+  const row = await get("SELECT COUNT(*) AS count FROM users");
   if (row.count > 0) return;
 
   // Production-style bootstrap: create just the first SuperAdmin from env.
@@ -784,6 +772,13 @@ async function seedIfEmpty() {
     );
     ids[email] = r.lastID;
   }
+
+  // Demo technician covering every outlet.
+  await run(
+    `INSERT INTO users (username, email, password_hash, role, department, all_brands, all_outlets, region, pic_area, is_active)
+     VALUES ('Edi', 'edi@union.com', ?, 'TechnicianIT', 'IT', 1, 1, 'Jakarta', 'IT Area', 1)`,
+    [pw]
+  );
 
   // Requestor scoped to UNION brand + UTP outlet
   await run('INSERT OR IGNORE INTO user_brand_access (user_id, brand_code) VALUES (?, ?)', [ids['requestor@union.com'], 'UNION']);

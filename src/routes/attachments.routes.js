@@ -1,31 +1,38 @@
 /* ==========================================================================
    Routes — Attachments (/api/attachments*)
-   Verbatim move from app.js (preserved robust upload logic + comment/phase
-   support). URLs, middleware, validation, access control, error messages and
-   response shapes unchanged. Mounted at "/" so full paths are preserved.
      POST   /api/attachments/upload         (single file)
      POST   /api/attachments/upload-chunk   (chunked upload assembly)
-     DELETE /api/attachments/:id            (uploader/admin scoped)
+     DELETE /api/attachments/:id            (uploader while unlinked · dept admin)
      GET    /api/attachments/:id            (ticket-scoped or uploader/admin)
-   Also starts the hourly orphaned-temp-file cleanup, as before.
+
+   Hardening notes
+   • The client's chunk `fileId` is only a correlation token: it is validated
+     against a strict charset and namespaced by user, and the stored file always
+     gets a fresh server-generated UUID. It can never become a path.
+   • Chunks must arrive in order; the assembled size is measured on disk and
+     must equal the declared size.
    ========================================================================== */
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const db = require("../../database");
 const { requireAuth } = require("../middleware/auth");
-const { isAdmin } = require("../utils/permissions");
+const { isAdmin, adminScopeForTicket } = require("../utils/permissions");
 const { getVisibleTicket } = require("../services/tickets.service");
 const {
   UPLOADS_DIR,
   TEMP_DIR,
   upload,
+  chunkUpload,
   ALLOWED_MIMES,
-  MAX_IMAGE_SIZE,
-  MAX_VIDEO_SIZE,
+  SAFE_ID_RE,
 } = require("../config/uploads");
-const { validateFile } = require("../services/upload.service");
+const {
+  storeValidated,
+  safeUnlink,
+  maxSizeFor,
+  cleanupUploads,
+} = require("../services/upload.service");
 
 const router = express.Router();
 
@@ -35,185 +42,170 @@ router.post(
   upload.single("file"),
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded." });
-    const { path: tempPath, originalname, mimetype, size } = req.file;
-    const err = validateFile(tempPath, mimetype, size);
-    if (err) {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-      return res.status(400).json({ error: err });
-    }
-    const sanitizedName = originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const fileId = crypto.randomUUID();
-    const destPath = path.join(UPLOADS_DIR, fileId);
-    try {
-      fs.renameSync(tempPath, destPath);
-    } catch (e) {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-      return res.status(500).json({ error: "Failed to save file." });
-    }
-    const fileUrl = `/api/attachments/${fileId}`;
-    try {
-      await db.pRun(
-        "INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type, uploaded_by) VALUES (?, NULL, ?, ?, ?, ?, ?)",
-        [fileId, fileUrl, sanitizedName, size, mimetype, req.user.id],
-      );
-      res
-        .status(201)
-        .json({
-          id: fileId,
-          file_url: fileUrl,
-          file_name: sanitizedName,
-          file_size: size,
-          mime_type: mimetype,
-        });
-    } catch (e) {
-      if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-      res.status(500).json({ error: e.message });
-    }
+    const out = await storeValidated(req.file.path, {
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      uploadedBy: req.user.id,
+    });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.status(201).json(out.row);
   },
 );
+
+// In-flight chunked uploads: key → { next, total, mimeType, size, fileName, touched }
+const chunkSessions = new Map();
+const MAX_CHUNKS = 200;
 
 router.post(
   "/api/attachments/upload-chunk",
   requireAuth,
-  upload.single("chunk"),
+  chunkUpload.single("chunk"),
   async (req, res) => {
-    const { fileId, chunkIndex, totalChunks, fileName, mimeType, fileSize } =
-      req.body;
-    if (!req.file)
-      return res.status(400).json({ error: "No file chunk received." });
-    const idx = parseInt(chunkIndex, 10),
-      total = parseInt(totalChunks, 10),
-      size = parseInt(fileSize, 10);
+    const chunkPath = req.file && req.file.path;
+    const fail = (status, error) => {
+      safeUnlink(chunkPath);
+      return res.status(status).json({ error });
+    };
+    if (!req.file) return res.status(400).json({ error: "No file chunk received." });
+
+    const { fileId, chunkIndex, totalChunks, fileName, mimeType, fileSize } = req.body || {};
+    const idx = Number.parseInt(chunkIndex, 10);
+    const total = Number.parseInt(totalChunks, 10);
+    const size = Number.parseInt(fileSize, 10);
     if (
-      !fileId ||
-      isNaN(idx) ||
-      isNaN(total) ||
-      !fileName ||
-      !mimeType ||
-      isNaN(size)
-    ) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: "Missing chunk metadata." });
+      !SAFE_ID_RE.test(String(fileId || "")) ||
+      !Number.isInteger(idx) || !Number.isInteger(total) || !Number.isInteger(size) ||
+      idx < 0 || total < 1 || total > MAX_CHUNKS || idx >= total || size < 1 ||
+      !fileName || !mimeType
+    )
+      return fail(400, "Missing or invalid chunk metadata.");
+    if (!ALLOWED_MIMES[mimeType]) return fail(400, "Unsupported file format.");
+    if (size > maxSizeFor(mimeType)) return fail(400, "File exceeds maximum size limits.");
+
+    const key = `${req.user.id}_${fileId}`;
+    const partPath = path.join(TEMP_DIR, `part_${key}`);
+    let session = chunkSessions.get(key);
+    if (idx === 0) {
+      safeUnlink(partPath); // a retry restarts from scratch
+      session = { next: 0, total, mimeType, size, fileName: String(fileName), touched: Date.now() };
+      chunkSessions.set(key, session);
     }
-    if (!ALLOWED_MIMES[mimeType]) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: "Unsupported file format." });
+    if (!session || session.next !== idx || session.total !== total || session.mimeType !== mimeType || session.size !== size) {
+      return fail(409, "Upload out of sequence. Please retry the file.");
     }
-    const isVideo = mimeType.startsWith("video/");
-    if (size > (isVideo ? MAX_VIDEO_SIZE : MAX_IMAGE_SIZE)) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res
-        .status(400)
-        .json({ error: "File exceeds maximum size limits." });
-    }
-    const tempFilePath = path.join(TEMP_DIR, `part_${fileId}`);
+
     try {
-      const chunkData = fs.readFileSync(req.file.path);
-      fs.appendFileSync(tempFilePath, chunkData);
-      fs.unlinkSync(req.file.path);
+      fs.appendFileSync(partPath, fs.readFileSync(chunkPath));
+      safeUnlink(chunkPath);
     } catch (e) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(500).json({ error: "Failed to process chunk." });
+      console.error("[upload] chunk append failed:", e.message);
+      chunkSessions.delete(key);
+      safeUnlink(partPath);
+      return fail(500, "Failed to process chunk.");
     }
-    if (idx === total - 1) {
-      const err = validateFile(tempFilePath, mimeType, size);
-      if (err) {
-        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-        return res.status(400).json({ error: err });
-      }
-      const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const finalPath = path.join(UPLOADS_DIR, fileId);
-      try {
-        fs.renameSync(tempFilePath, finalPath);
-      } catch (e) {
-        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-        return res.status(500).json({ error: "Failed to assemble upload." });
-      }
-      const fileUrl = `/api/attachments/${fileId}`;
-      try {
-        await db.pRun(
-          "INSERT INTO attachments (id, ticket_id, file_url, file_name, file_size, mime_type, uploaded_by) VALUES (?, NULL, ?, ?, ?, ?, ?)",
-          [fileId, fileUrl, sanitizedName, size, mimeType, req.user.id],
-        );
-        res
-          .status(201)
-          .json({
-            id: fileId,
-            file_url: fileUrl,
-            file_name: sanitizedName,
-            file_size: size,
-            mime_type: mimeType,
-          });
-      } catch (e) {
-        if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
-        res.status(500).json({ error: e.message });
-      }
-    } else {
-      res.json({ status: "chunk_uploaded", chunkIndex: idx });
+    const assembled = fs.statSync(partPath).size;
+    if (assembled > size) {
+      chunkSessions.delete(key);
+      safeUnlink(partPath);
+      return res.status(400).json({ error: "Upload is larger than declared." });
     }
+    session.next += 1;
+    session.touched = Date.now();
+
+    if (idx < total - 1) return res.json({ status: "chunk_uploaded", chunkIndex: idx });
+
+    chunkSessions.delete(key);
+    if (assembled !== size) {
+      safeUnlink(partPath);
+      return res.status(400).json({ error: "Upload is incomplete. Please retry." });
+    }
+    const out = await storeValidated(partPath, {
+      originalName: session.fileName,
+      mimeType,
+      uploadedBy: req.user.id,
+    });
+    if (out.error) return res.status(out.status).json({ error: out.error });
+    res.status(201).json(out.row);
   },
 );
 
 router.delete("/api/attachments/:id", requireAuth, async (req, res) => {
-  const row = await db.pGet("SELECT * FROM attachments WHERE id = ?", [
-    req.params.id,
-  ]);
-  if (!row) return res.status(404).json({ error: "Attachment not found." });
-  if (req.user.role === "Requestor" && row.uploaded_by !== req.user.id)
-    return res.status(403).json({ error: "Forbidden." });
-  await db.pRun("DELETE FROM attachments WHERE id = ?", [req.params.id]);
-  const filePath = path.join(UPLOADS_DIR, req.params.id);
-  if (fs.existsSync(filePath)) {
-    try {
-      fs.unlinkSync(filePath);
-    } catch (e) {
-      console.error(e);
+  try {
+    if (!SAFE_ID_RE.test(req.params.id))
+      return res.status(404).json({ error: "Attachment not found." });
+    const row = await db.pGet("SELECT * FROM attachments WHERE id = ?", [req.params.id]);
+    if (!row) return res.status(404).json({ error: "Attachment not found." });
+
+    let allowed = false;
+    if (!row.ticket_id) {
+      // Still a draft upload: only whoever uploaded it (or an admin) may discard it.
+      allowed = row.uploaded_by === req.user.id || isAdmin(req.user);
+    } else {
+      // Evidence already on a ticket is part of its history — dept admins only.
+      const ticket = await getVisibleTicket(req.user, row.ticket_id);
+      allowed = !!ticket && adminScopeForTicket(req.user, ticket);
     }
+    if (!allowed) return res.status(403).json({ error: "Forbidden." });
+
+    await db.pRun("DELETE FROM attachments WHERE id = ?", [row.id]);
+    safeUnlink(path.join(UPLOADS_DIR, row.id));
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to delete attachment." });
   }
-  res.json({ success: true });
 });
 
 router.get("/api/attachments/:id", requireAuth, async (req, res) => {
-  const row = await db.pGet("SELECT * FROM attachments WHERE id = ?", [
-    req.params.id,
-  ]);
-  if (!row)
-    return res.status(404).json({ error: "Attachment reference not found." });
-  const sendFileResponse = () => {
-    const filePath = path.join(UPLOADS_DIR, req.params.id);
+  try {
+    if (!SAFE_ID_RE.test(req.params.id))
+      return res.status(404).json({ error: "Attachment reference not found." });
+    const row = await db.pGet("SELECT * FROM attachments WHERE id = ?", [req.params.id]);
+    if (!row)
+      return res.status(404).json({ error: "Attachment reference not found." });
+
+    if (row.ticket_id) {
+      const ticket = await getVisibleTicket(req.user, row.ticket_id, { techFilter: "all" });
+      if (!ticket) return res.status(403).json({ error: "Forbidden." });
+    } else if (row.uploaded_by !== req.user.id && !isAdmin(req.user)) {
+      // Unlinked upload — only the uploader (or an admin) may fetch it.
+      return res.status(403).json({ error: "Forbidden." });
+    }
+
+    const filePath = path.join(UPLOADS_DIR, row.id);
     if (!fs.existsSync(filePath))
       return res.status(404).json({ error: "File not found on server disk." });
-    res.setHeader("Content-Type", row.mime_type);
+    // Only allow-listed media types are ever stored, but never let the browser
+    // second-guess the declared type.
+    const type = ALLOWED_MIMES[row.mime_type] ? row.mime_type : "application/octet-stream";
+    res.setHeader("Content-Type", type);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "private, max-age=3600");
     res.setHeader(
       "Content-Disposition",
       `inline; filename*=UTF-8''${encodeURIComponent(row.file_name)}`,
     );
     res.sendFile(filePath);
-  };
-  // Admins/SuperAdmin: department-scoped access via the ticket.
-  if (row.ticket_id) {
-    const ticket = await getVisibleTicket(req.user, row.ticket_id);
-    if (!ticket) return res.status(403).json({ error: "Forbidden." });
-    return sendFileResponse();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to load attachment." });
   }
-  // Unlinked upload — only the uploader may fetch it.
-  if (row.uploaded_by !== req.user.id && !isAdmin(req.user))
-    return res.status(403).json({ error: "Forbidden." });
-  sendFileResponse();
 });
 
-// --- Orphaned temp upload cleanup (hourly) ---------------------------------
-function cleanupOrphans() {
-  try {
-    const now = Date.now();
-    for (const f of fs.readdirSync(TEMP_DIR)) {
-      const p = path.join(TEMP_DIR, f);
-      try {
-        if (now - fs.statSync(p).mtimeMs > 6 * 60 * 60 * 1000) fs.unlinkSync(p);
-      } catch (_) {}
+// --- Housekeeping (hourly) -------------------------------------------------
+function sweepChunkSessions() {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [key, s] of chunkSessions) {
+    if (s.touched < cutoff) {
+      chunkSessions.delete(key);
+      safeUnlink(path.join(TEMP_DIR, `part_${key}`));
     }
-  } catch (_) {}
+  }
 }
-setInterval(cleanupOrphans, 60 * 60 * 1000);
+const housekeeping = setInterval(() => {
+  sweepChunkSessions();
+  cleanupUploads();
+}, 60 * 60 * 1000);
+housekeeping.unref();
 
 module.exports = router;

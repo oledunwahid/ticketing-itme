@@ -1,5 +1,4 @@
 const db = require('../database');
-const bcrypt = require('bcryptjs');
 
 async function testAll() {
   console.log("=== VERIFICATION START ===");

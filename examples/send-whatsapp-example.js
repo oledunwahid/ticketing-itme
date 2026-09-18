@@ -1,3 +1,4 @@
+require('../src/config/env'); // loads FONNTE_TOKEN from .env
 const { sendWhatsApp, formatPhoneNumber } = require('../services/fonnte');
 
 // Example parameters

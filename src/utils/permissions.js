@@ -109,9 +109,11 @@ async function getUserScope(user) {
 // Technician PIC scope: their assigned PIC outlets + whether they have broad
 // (all-outlet) access. Loaded from DB because the JWT does not carry these.
 async function getTechnicianScope(user) {
-  const row = await db.pGet("SELECT all_outlets FROM users WHERE id = ?", [
-    user.id,
-  ]);
+  // requireAuth loads the current user row, so all_outlets is usually present.
+  const row =
+    user.all_outlets !== undefined
+      ? user
+      : await db.pGet("SELECT all_outlets FROM users WHERE id = ?", [user.id]);
   const allOutlets = !!(row && row.all_outlets);
   const picOutlets = (
     await db.pAll("SELECT outlet_code FROM user_outlet_access WHERE user_id = ?", [

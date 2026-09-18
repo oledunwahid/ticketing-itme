@@ -82,14 +82,15 @@ async function teamRoleOf(ticket, userId) {
 
 // Load a technician row and check they can be put on this ticket at all.
 // Returns { tech } or { error, status } — never throws for ordinary refusals.
-async function loadAssignableTechnician(technicianId, ticket, { override = false } = {}) {
+async function loadAssignableTechnician(technicianId, ticket, { override = false, allowInactive = false } = {}) {
   const tech = await db.pGet(
     "SELECT id, username, email, phone, department, role, is_active FROM users WHERE id = ?",
     [technicianId],
   );
   if (!tech || !isTechnician({ role: tech.role }))
     return { error: "Not a valid technician", status: 400 };
-  if (tech.is_active === 0)
+  // A deactivated technician can still be taken OFF a ticket.
+  if (tech.is_active === 0 && !allowInactive)
     return { error: "Technician is inactive", status: 400 };
   const techDept = deptForRole(tech.role);
   if (techDept !== ticket.department && !override) {
@@ -181,12 +182,14 @@ async function addCollaborator(ticket, tech, actor, note, via = "admin") {
   const detail =
     via === "invite"
       ? `${who} invited ${tech.username} as Collaborator.`
-      : `${who} added ${tech.username} as Collaborator.`;
+      : via === "self"
+        ? `${tech.username} joined as Collaborator.`
+        : `${who} added ${tech.username} as Collaborator.`;
   await logActivity(
     ticket.id,
     actor,
     via === "invite" ? "ticket.collaborator_invited" : "ticket.collaborator_added",
-    withNote(detail, note),
+    via === "self" ? detail : withNote(detail, note),
   );
   return { added: true, role_type: "collaborator" };
 }

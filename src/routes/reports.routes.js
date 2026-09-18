@@ -25,6 +25,9 @@ const {
   avg,
 } = require("../utils/reporting");
 
+const { isDate } = require("../utils/validate");
+const { neutralizeFormula } = require("../utils/csv");
+
 const router = express.Router();
 
 const REPORT_ROLES = ["SuperAdmin", "AdminIT", "AdminME", "Leader"];
@@ -65,12 +68,14 @@ async function scopedTicketSql(user, q) {
   if (q.category) add(" AND t.category = ?", q.category);
   if (q.urgency) add(" AND t.urgency = ?", q.urgency);
   if (q.technician) add(" AND t.assignee_name = ?", q.technician);
-  if (q.start_date) add(" AND date(t.created_at) >= date(?)", q.start_date);
-  if (q.end_date) add(" AND date(t.created_at) <= date(?)", q.end_date);
+  // Date filters are calendar days in the server's local time zone (the stored
+  // created_at is UTC); schedules are already local wall-clock values.
+  if (q.start_date) add(" AND date(t.created_at, 'localtime') >= date(?)", q.start_date);
+  if (q.end_date) add(" AND date(t.created_at, 'localtime') <= date(?)", q.end_date);
   if (q.scheduled_from)
-    add(" AND date(t.scheduled_at) >= date(?)", q.scheduled_from);
+    add(" AND substr(t.scheduled_at, 1, 10) >= ?", q.scheduled_from);
   if (q.scheduled_to)
-    add(" AND date(t.scheduled_at) <= date(?)", q.scheduled_to);
+    add(" AND substr(t.scheduled_at, 1, 10) <= ?", q.scheduled_to);
   sql += " ORDER BY t.created_at DESC"; // newest first (urgency never default)
   return { sql, params };
 }
@@ -92,6 +97,22 @@ async function fetchEnriched(user, q) {
   return { rows, targets, now };
 }
 
+// Reject malformed filters up-front with a readable message.
+function filterError(q) {
+  for (const k of ["start_date", "end_date", "scheduled_from", "scheduled_to"]) {
+    if (q[k] !== undefined && q[k] !== "" && !isDate(String(q[k])))
+      return `${k.replace("_", " ")} must be a date (YYYY-MM-DD)`;
+  }
+  if (q.start_date && q.end_date && q.start_date > q.end_date)
+    return "Start date must be before end date";
+  if (q.scheduled_from && q.scheduled_to && q.scheduled_from > q.scheduled_to)
+    return "Scheduled-from must be before scheduled-to";
+  for (const [k, v] of Object.entries(q)) {
+    if (typeof v !== "string") return `Invalid value for ${k}`;
+  }
+  return null;
+}
+
 // --- GET /api/reports/tickets (raw filtered JSON) --------------------------
 router.get(
   "/api/reports/tickets",
@@ -99,14 +120,8 @@ router.get(
   requireRole(...REPORT_ROLES),
   async (req, res) => {
     try {
-      if (
-        req.query.start_date &&
-        req.query.end_date &&
-        req.query.start_date > req.query.end_date
-      )
-        return res
-          .status(400)
-          .json({ error: "Start date must be before end date" });
+      const bad = filterError(req.query);
+      if (bad) return res.status(400).json({ error: bad });
       const { rows } = await fetchEnriched(req.user, req.query);
       res.json(rows);
     } catch (e) {
@@ -316,11 +331,15 @@ async function buildPerformance(user, q) {
 
   // Scheduled monitoring (On Scheduled tickets).
   const sched = rows.filter((r) => r.status === "On Scheduled");
-  const startOfWeek = new Date();
-  startOfWeek.setHours(0, 0, 0, 0);
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const d0 = new Date(now);
+  const todayStr = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, "0")}-${String(d0.getDate()).padStart(2, "0")}`;
   const weekAhead = now + 7 * 24 * 3600 * 1000;
-  const schedMs = (r) => (r.scheduled_at ? Date.parse(String(r.scheduled_at).replace(" ", "T") + "Z") : null);
+  // scheduled_at is local wall-clock text from a datetime-local input.
+  const schedMs = (r) => {
+    if (!r.scheduled_at) return null;
+    const t = Date.parse(String(r.scheduled_at).replace(" ", "T"));
+    return Number.isNaN(t) ? null : t;
+  };
   const scheduled = {
     total: sched.length,
     today: sched.filter(
@@ -379,14 +398,8 @@ router.get(
   requireRole(...REPORT_ROLES),
   async (req, res) => {
     try {
-      if (
-        req.query.start_date &&
-        req.query.end_date &&
-        req.query.start_date > req.query.end_date
-      )
-        return res
-          .status(400)
-          .json({ error: "Start date must be before end date" });
+      const bad = filterError(req.query);
+      if (bad) return res.status(400).json({ error: bad });
       res.json(await buildPerformance(req.user, req.query));
     } catch (e) {
       console.error(e);
@@ -396,7 +409,12 @@ router.get(
 );
 
 // --- CSV helpers -----------------------------------------------------------
-const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+// Quote every cell; neutralise spreadsheet formulas (=, +, -, @) in text cells.
+const esc = (v) => {
+  let s = String(v == null ? "" : v);
+  if (typeof v === "string") s = neutralizeFormula(s);
+  return `"${s.replace(/"/g, '""')}"`;
+};
 function toCsv(header, cols, rows) {
   let csv = "﻿" + header.join(",") + "\n";
   for (const r of rows) csv += cols.map((c) => esc(typeof c === "function" ? c(r) : r[c])).join(",") + "\n";
@@ -419,6 +437,8 @@ router.get(
   requireRole(...REPORT_ROLES),
   async (req, res) => {
     try {
+      const bad = filterError(req.query);
+      if (bad) return res.status(400).json({ error: bad });
       const kind = req.query.export || "raw";
       if (kind === "technician") {
         const perf = await buildPerformance(req.user, req.query);

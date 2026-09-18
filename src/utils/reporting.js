@@ -234,7 +234,7 @@ function buildInsights(agg, filters = {}) {
   if (topCat && topCat.total > 0) {
     summary += ` The highest ticket volume came from ${topCat.category} issues (${topCat.total}).`;
     bullets.push(
-      `Most recurring category: ${topCat.department ? topCat.department + " · " : ""}${topCat.category} — ${topCat.total} ticket(s).`,
+      `Most recurring category: ${topCat.department ? topCat.department + " · " : ""}${topCat.category}: ${topCat.total} ticket(s).`,
     );
   }
 
@@ -252,20 +252,20 @@ function buildInsights(agg, filters = {}) {
       line += `, while ${fastest.technician} had the fastest average resolution (${fmtDuration(fastest.avg_resolution_mins)})`;
     summary += ` ${line}.`;
     bullets.push(
-      `Top resolver: ${mostResolved.technician} — ${mostResolved.resolved} resolved.`,
+      `Top resolver: ${mostResolved.technician}, ${mostResolved.resolved} resolved.`,
     );
   }
   if (fastest)
     bullets.push(
-      `Fastest average resolution: ${fastest.technician} — ${fmtDuration(fastest.avg_resolution_mins)}.`,
+      `Fastest average resolution: ${fastest.technician}, ${fmtDuration(fastest.avg_resolution_mins)}.`,
     );
   if (mostBreach && mostBreach.sla_breached > 0)
     bullets.push(
-      `Most SLA breaches: ${mostBreach.technician} — ${mostBreach.sla_breached} breach(es).`,
+      `Most SLA breaches: ${mostBreach.technician}, ${mostBreach.sla_breached} breach(es).`,
     );
   if (highestWorkload && highestWorkload.open_workload > 0)
     bullets.push(
-      `Highest current workload: ${highestWorkload.technician} — ${highestWorkload.open_workload} open ticket(s).`,
+      `Highest current workload: ${highestWorkload.technician}, ${highestWorkload.open_workload} open ticket(s).`,
     );
 
   if (s.sla_achievement != null) {
@@ -283,7 +283,7 @@ function buildInsights(agg, filters = {}) {
   const topOutlet = (agg.outlets || [])[0];
   if (topOutlet && topOutlet.total > 0) {
     bullets.push(
-      `Most problematic outlet: ${topOutlet.outlet} — ${topOutlet.total} ticket(s)${topOutlet.sla_breached ? `, ${topOutlet.sla_breached} SLA breach(es)` : ""}.`,
+      `Most problematic outlet: ${topOutlet.outlet}: ${topOutlet.total} ticket(s)${topOutlet.sla_breached ? `, ${topOutlet.sla_breached} SLA breach(es)` : ""}.`,
     );
   }
   const recurring = (agg.recurring || [])[0];
@@ -296,14 +296,14 @@ function buildInsights(agg, filters = {}) {
   const heavier = [...depts].sort((a, b) => b.backlog - a.backlog)[0];
   if (heavier && heavier.backlog > 0)
     bullets.push(
-      `Highest backlog: ${heavier.department} — ${heavier.backlog} open ticket(s).`,
+      `Highest backlog: ${heavier.department}, ${heavier.backlog} open ticket(s).`,
     );
 
   // Region highlight.
   const topRegion = [...(agg.regions || [])].sort((a, b) => b.total - a.total)[0];
   if (topRegion && topRegion.total > 0)
     bullets.push(
-      `Highest ticket count by region: ${topRegion.region} — ${topRegion.total} ticket(s).`,
+      `Highest ticket count by region: ${topRegion.region}: ${topRegion.total} ticket(s).`,
     );
 
   // Scheduled work.

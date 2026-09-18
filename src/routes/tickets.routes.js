@@ -1,17 +1,17 @@
 /* ==========================================================================
-   Routes — Tickets (READ-ONLY subset)
-   Phase 2.4B1: only read-only ticket endpoints live here. Mutation routes
-   (POST/PATCH/comments/assign/recommend) remain inline in app.js and will be
-   moved in a later, separately-approved phase.
-
-   Verbatim move from app.js — URLs, middleware, RBAC, scoping and response
-   shapes unchanged. Mounted at "/" so full "/api/..." paths are preserved.
-
-   Endpoints:
-     GET /api/tickets         (scoped list)
-     GET /api/tickets/export  (scoped list as CSV — same filters as the list)
-     GET /api/tickets/:id     (scoped detail bundle)
-     GET /api/dashboard       (scoped ticket summary)
+   Routes — Tickets & dashboard
+     GET   /api/tickets                              scoped list (+ SLA fields)
+     GET   /api/tickets/export                       scoped list as CSV
+     GET   /api/tickets/:id                          scoped detail bundle
+     GET   /api/dashboard                            scoped metrics
+     GET   /api/tickets/:id/recommend                admin: ranked technicians
+     POST  /api/tickets/:id/comments                 reply (+ attachments)
+     PATCH /api/tickets/:id                          status / fields
+     POST  /api/tickets/:id/assign                   admin: team management
+     GET   /api/tickets/:id/assignable-technicians   invite candidates
+     POST  /api/tickets/:id/collaborators/invite     technician invite
+     POST  /api/tickets/:id/assign-to-me             technician self-assign
+     POST  /api/tickets                              create
    ========================================================================== */
 const express = require("express");
 const crypto = require("crypto");
@@ -27,7 +27,7 @@ const {
   canClose,
   technicianDeptMatches,
 } = require("../utils/permissions");
-const { getVisibleTicket } = require("../services/tickets.service");
+const { getVisibleTicket, toClientTicket } = require("../services/tickets.service");
 const {
   TERMINAL_STATUSES,
   actorLabel,
@@ -39,14 +39,16 @@ const {
   removeAssignment,
 } = require("../services/assignment.service");
 const { validateTransition } = require("../utils/statusTransition");
-const { nextTicketNumber } = require("../utils/ticketNumber");
+const { insertWithNumber } = require("../utils/ticketNumber");
 const { logActivity } = require("../services/auditLog.service");
+const { normalizeIds } = require("../services/upload.service");
 const {
   DEPARTMENTS,
   URGENCIES,
   ADMIN_ROLES,
-  SLA_TARGET_MINUTES,
+  STATUSES,
   STATUS_GROUPS,
+  statusGroup,
   statusesInGroup,
   TECHNICIAN_STATUSES,
   WAITING_STATUSES,
@@ -55,36 +57,39 @@ const {
   recommendTechnicians,
   OPEN_ASSIGNED_STATUSES,
 } = require("../../services/recommend");
-const { notify } = require("../../services/notifications");
+const { notify, alertNewTicket } = require("../../services/notifications");
 const { toCsv } = require("../utils/csv");
+const { getSlaTargets, enrichTicket, ms: parseMs, avg } = require("../utils/reporting");
+const {
+  LIMITS,
+  ValidationError,
+  optStr,
+  optDateTime,
+  optPhone,
+  EMAIL_RE,
+} = require("../utils/validate");
 
 const router = express.Router();
+
+const LIST_CAP = 5000;
+const likeEscape = (s) => String(s).replace(/[\\%_]/g, (c) => "\\" + c);
+
+function sendError(res, e, fallback) {
+  if (e instanceof ValidationError) return res.status(400).json({ error: e.message });
+  console.error(e);
+  res.status(500).json({ error: fallback });
+}
 
 // --------------------------------------------------------------------------
 // Shared list query — the scope clause, filters and ordering used by BOTH the
 // ticket list and the CSV export, so an export can never widen (or narrow)
-// what the list on screen shows.
-// Returns { where, params, orderBy }. The scope clause references the tickets
-// table by bare column names (and `tickets.id`), so callers must keep the table
-// unaliased and must not JOIN tables that share column names with it.
+// what the list on screen shows. The scope clause references the tickets
+// table by bare column names, so callers must keep the table unaliased.
 // --------------------------------------------------------------------------
 async function buildTicketListQuery(user, query) {
-  const {
-    status,
-    priority,
-    urgency,
-    department,
-    brand,
-    outlet,
-    region,
-    category,
-    search,
-    assigned,
-    scope: techFilter,
-    sort,
-    status_group: statusGroupFilter,
-  } = query;
-  const scope = await buildTicketScope(user, { techFilter });
+  const q = query || {};
+  const str = (v) => (typeof v === "string" ? v.trim().slice(0, 120) : "");
+  const scope = await buildTicketScope(user, { techFilter: str(q.scope) });
   let where = scope.clause;
   const params = [...scope.params];
   const add = (frag, ...vals) => {
@@ -92,70 +97,81 @@ async function buildTicketListQuery(user, query) {
     params.push(...vals);
   };
 
+  const status = str(q.status);
   if (status) add(" AND status = ?", status);
-  // Optional grouped filter (dashboard core-card drill-down). Expands to the
-  // real statuses in that group — the stored status is never rewritten.
-  if (statusGroupFilter && STATUS_GROUPS.includes(statusGroupFilter)) {
-    const members = statusesInGroup(statusGroupFilter);
+  const group = str(q.status_group);
+  if (group && STATUS_GROUPS.includes(group)) {
+    const members = statusesInGroup(group);
     add(` AND status IN (${members.map(() => "?").join(",")})`, ...members);
   }
+  const urgency = str(q.urgency) || str(q.priority);
   if (urgency) add(" AND urgency = ?", urgency);
-  if (priority) add(" AND urgency = ?", priority); // legacy alias
-  if (department && DEPARTMENTS.includes(department))
-    add(" AND department = ?", department);
-  if (brand) add(" AND brand_code = ?", brand);
-  if (outlet) add(" AND outlet_code = ?", outlet);
-  if (region) add(" AND region = ?", region);
-  if (category) add(" AND category = ?", category);
-  // Unassigned filter (dashboard "Unassigned" card drill-down). Matches the
-  // dashboard count: no primary technician and not Closed/Cancelled.
-  if (assigned === "no" || assigned === "unassigned")
+  if (DEPARTMENTS.includes(str(q.department))) add(" AND department = ?", str(q.department));
+  if (str(q.brand)) add(" AND brand_code = ?", str(q.brand));
+  if (str(q.outlet)) add(" AND outlet_code = ?", str(q.outlet));
+  if (str(q.region)) add(" AND region = ?", str(q.region));
+  if (str(q.category)) add(" AND category = ?", str(q.category));
+  if (q.assigned === "no" || q.assigned === "unassigned")
     add(" AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')");
+  if (q.open === "1") add(" AND status NOT IN ('Resolved','Closed','Cancelled')");
+  const search = str(q.search);
   if (search) {
+    const s = `%${likeEscape(search)}%`;
     add(
-      " AND (title LIKE ? OR description LIKE ? OR ticket_number LIKE ? OR customer_name LIKE ? OR customer_email LIKE ?)",
-      `%${search}%`,
-      `%${search}%`,
-      `%${search}%`,
-      `%${search}%`,
-      `%${search}%`,
+      " AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR ticket_number LIKE ? ESCAPE '\\'" +
+        " OR customer_name LIKE ? ESCAPE '\\' OR customer_email LIKE ? ESCAPE '\\' OR outlet_code LIKE ? ESCAPE '\\'" +
+        " OR assignee_name LIKE ? ESCAPE '\\')",
+      s, s, s, s, s, s, s,
     );
   }
 
-  // Default sort is newest-first (created_at DESC). Urgency ordering is only
-  // applied when explicitly requested — it never controls the default.
+  // Default sort is newest-first. Urgency ordering only when asked for.
   let orderBy;
-  if (sort === "created_asc") orderBy = " ORDER BY created_at ASC";
-  else if (sort === "urgency")
+  if (q.sort === "created_asc") orderBy = " ORDER BY created_at ASC, id ASC";
+  else if (q.sort === "updated") orderBy = " ORDER BY COALESCE(updated_at, created_at) DESC, id DESC";
+  else if (q.sort === "urgency")
     orderBy = ` ORDER BY CASE urgency WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END ASC, created_at DESC`;
-  else orderBy = " ORDER BY created_at DESC"; // default (also 'created_desc')
+  else orderBy = " ORDER BY created_at DESC, id DESC";
 
   return { where, params, orderBy };
 }
 
+// SLA fields the list/detail views show (target, deadline, status, aging).
+function withSla(t, targets, now) {
+  const e = enrichTicket(t, targets, now);
+  return {
+    ...toClientTicket(t),
+    sla_status: e.sla_status,
+    sla_deadline_at: e.sla_deadline_at,
+    sla_target_minutes: e.sla_target_minutes,
+    aging_minutes: e.aging_minutes,
+    breach_minutes: e.breach_minutes,
+  };
+}
+
 router.get("/api/tickets", requireAuth, async (req, res) => {
   try {
-    const { where, params, orderBy } = await buildTicketListQuery(
-      req.user,
-      req.query,
+    const { where, params, orderBy } = await buildTicketListQuery(req.user, req.query);
+    const rows = await db.pAll(
+      `SELECT * FROM tickets WHERE ${where}${orderBy} LIMIT ${LIST_CAP + 1}`,
+      params,
     );
-    res.json(
-      await db.pAll(`SELECT * FROM tickets WHERE ${where}${orderBy}`, params),
-    );
+    if (rows.length > LIST_CAP) {
+      rows.length = LIST_CAP;
+      res.setHeader("X-Result-Truncated", "1");
+    }
+    const targets = await getSlaTargets();
+    const now = Date.now();
+    res.json(rows.map((t) => withSla(t, targets, now)));
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to fetch tickets" });
+    sendError(res, e, "Failed to fetch tickets");
   }
 });
 
 // ==========================================================================
-// CSV export of the ticket list
-// Accepts exactly the same query params as GET /api/tickets and is scoped by
-// the same buildTicketScope clause — a user can only ever export the rows they
-// can already see in the list.
+// CSV export of the ticket list (same params + scope as the list).
 // NOTE: must stay ABOVE "/api/tickets/:id" or "export" is read as an id.
 // ==========================================================================
-// [csv header, ticket field | (ticket) => value]
 const EXPORT_COLUMNS = [
   ["Ticket Number", (t) => t.ticket_number || "#" + t.id],
   ["Title", "title"],
@@ -181,34 +197,18 @@ const EXPORT_COLUMNS = [
   ["Scheduled End", "scheduled_end"],
   ["Resolved At", "resolved_at"],
   ["Closed At", "closed_at"],
-  ["Age (hours)", (t) => ageHours(t)],
+  ["SLA Status", "sla_status"],
+  ["SLA Deadline", "sla_deadline_at"],
+  ["Age (hours)", (t) => (t.aging_minutes == null ? "" : Math.round((t.aging_minutes / 60) * 10) / 10)],
   ["Description", "description"],
   ["Resolution Note", "resolution_note"],
 ];
 
-// Stored timestamps are UTC "YYYY-MM-DD HH:MM:SS" — normalise before parsing.
-const parseTs = (s) => {
-  if (!s) return null;
-  const d = new Date(/[TZ]/.test(s) ? s : String(s).replace(" ", "T") + "Z");
-  return isNaN(d.getTime()) ? null : d;
-};
-// Open tickets age until now; finished ones stop at closed/resolved.
-function ageHours(t) {
-  const from = parseTs(t.created_at);
-  if (!from) return "";
-  const to = parseTs(t.closed_at) || parseTs(t.resolved_at) || new Date();
-  return Math.max(0, Math.round(((to - from) / 3600000) * 10) / 10);
-}
-
 router.get("/api/tickets/export", requireAuth, async (req, res) => {
   try {
-    const { where, params, orderBy } = await buildTicketListQuery(
-      req.user,
-      req.query,
-    );
+    const { where, params, orderBy } = await buildTicketListQuery(req.user, req.query);
     // Outlet name via correlated subquery, not a JOIN — outlets shares column
-    // names (brand_code, region) with tickets and would make the scope clause
-    // ambiguous.
+    // names with tickets and would make the scope clause ambiguous.
     const rows = await db.pAll(
       `SELECT tickets.*,
               (SELECT COALESCE(o.name, o.display_label, tickets.outlet_code)
@@ -216,8 +216,11 @@ router.get("/api/tickets/export", requireAuth, async (req, res) => {
          FROM tickets WHERE ${where}${orderBy}`,
       params,
     );
+    const targets = await getSlaTargets();
+    const now = Date.now();
     const headers = EXPORT_COLUMNS.map(([h]) => h);
-    const records = rows.map((t) => {
+    const records = rows.map((raw) => {
+      const t = withSla(raw, targets, now);
       const rec = {};
       for (const [h, src] of EXPORT_COLUMNS)
         rec[h] = typeof src === "function" ? src(t) : t[src];
@@ -230,20 +233,18 @@ router.get("/api/tickets/export", requireAuth, async (req, res) => {
     );
     res.send("﻿" + toCsv(headers, records)); // BOM so Excel reads UTF-8
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to export tickets" });
+    sendError(res, e, "Failed to export tickets");
   }
 });
 
 router.get("/api/tickets/:id", requireAuth, async (req, res) => {
   try {
-    const ticket = await getVisibleTicket(req.user, req.params.id);
+    // Technicians may open anything inside their hard cap (PIC outlets, own
+    // jobs, or the whole department when granted all-outlet access) — the same
+    // set the "All allowed tickets" list shows.
+    const ticket = await getVisibleTicket(req.user, req.params.id, { techFilter: "all" });
     if (!ticket)
-      return res
-        .status(404)
-        .json({ error: "Ticket not found or access denied" });
-    // Attach a human-friendly outlet name (name → display_label → code) so the
-    // detail header can show "[NUMBER] - [Outlet Name]" without an extra call.
+      return res.status(404).json({ error: "Ticket not found or access denied" });
     if (ticket.outlet_code) {
       const outlet = await db.pGet(
         "SELECT name, display_label FROM outlets WHERE code = ?",
@@ -254,245 +255,298 @@ router.get("/api/tickets/:id", requireAuth, async (req, res) => {
     } else {
       ticket.outlet_name = null;
     }
-    const comments = await db.pAll(
-      "SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC",
-      [ticket.id],
-    );
-    const activity = await db.pAll(
-      "SELECT * FROM ticket_activity_logs WHERE ticket_id = ? ORDER BY created_at ASC",
-      [ticket.id],
-    );
-    const attachments = await db.pAll(
-      "SELECT * FROM attachments WHERE ticket_id = ?",
-      [ticket.id],
-    );
-    const assignments = await db.pAll(
-      `SELECT a.*, u.username AS technician_name, u.email AS technician_email, u.phone AS technician_phone, u.role AS technician_role
-       FROM ticket_assignments a
-       LEFT JOIN users u ON u.id = a.technician_id WHERE a.ticket_id = ? ORDER BY a.assigned_at DESC`,
-      [ticket.id],
-    );
+    const [comments, activity, attachments, assignments] = await Promise.all([
+      db.pAll("SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC, id ASC", [ticket.id]),
+      db.pAll("SELECT * FROM ticket_activity_logs WHERE ticket_id = ? ORDER BY created_at ASC, id ASC", [ticket.id]),
+      db.pAll("SELECT id, ticket_id, comment_id, file_url, file_name, file_size, mime_type, phase, uploaded_by, created_at FROM attachments WHERE ticket_id = ? ORDER BY created_at ASC", [ticket.id]),
+      db.pAll(
+        `SELECT a.*, u.username AS technician_name, u.email AS technician_email, u.phone AS technician_phone, u.role AS technician_role
+           FROM ticket_assignments a
+           LEFT JOIN users u ON u.id = a.technician_id
+          WHERE a.ticket_id = ? ORDER BY a.assigned_at DESC`,
+        [ticket.id],
+      ),
+    ]);
     const activeAssignments = assignments.filter((a) => a.active === 1 || a.is_active === 1);
-    const primaryTechnician = activeAssignments.find((a) => (a.role_type || 'primary') === 'primary') || null;
-    const collaborators = activeAssignments.filter((a) => a.role_type === 'collaborator');
+    const primaryTechnician = activeAssignments.find((a) => (a.role_type || "primary") === "primary") || null;
+    const collaborators = activeAssignments.filter((a) => a.role_type === "collaborator");
 
-    res.json({ ticket, comments, activity, attachments, assignments, activeAssignments, primaryTechnician, collaborators });
+    const targets = await getSlaTargets();
+    res.json({
+      ticket: withSla(ticket, targets, Date.now()),
+      comments,
+      activity,
+      attachments,
+      assignments,
+      activeAssignments,
+      primaryTechnician,
+      collaborators,
+    });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to fetch ticket" });
+    sendError(res, e, "Failed to fetch ticket");
   }
 });
 
 // ==========================================================================
-// Dashboard (role-aware aggregates)
+// Dashboard — one scoped query, everything else is computed in memory so the
+// numbers on every card come from the same snapshot.
 // ==========================================================================
+const pad2 = (n) => String(n).padStart(2, "0");
+const localDay = (msVal) => {
+  const d = new Date(msVal);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+// Schedules come from <input type="datetime-local"> (local wall-clock time,
+// no zone) — take their date as written; zoned values are converted.
+const scheduleDay = (v) => {
+  const s = String(v);
+  if (/(Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+    const m = Date.parse(s);
+    return Number.isNaN(m) ? null : localDay(m);
+  }
+  return s.slice(0, 10);
+};
+function countInto(map, key) {
+  const k = key == null || key === "" ? null : key;
+  map.set(k, (map.get(k) || 0) + 1);
+}
+const topN = (map, n, keyName) =>
+  [...map.entries()]
+    .filter(([k]) => k != null)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k, c]) => ({ [keyName]: k, c }));
+
 router.get("/api/dashboard", requireAuth, async (req, res) => {
   try {
     const scope = await buildTicketScope(req.user);
-    const W = scope.clause;
-    const P = scope.params;
-    const one = async (sql, extra = []) =>
-      (
-        await db.pGet(`SELECT COUNT(*) c FROM tickets WHERE ${W}${sql}`, [
-          ...P,
-          ...extra,
-        ])
-      ).c;
+    const rows = await db.pAll(
+      `SELECT id, status, urgency, department, brand_code, outlet_code,
+              COALESCE(region, 'Jakarta') AS region, category,
+              assigned_technician_id, assignee_name, created_at, updated_at,
+              first_response_at, assigned_at, started_at, resolved_at, closed_at, scheduled_at
+         FROM tickets WHERE ${scope.clause}`,
+      scope.params,
+    );
+    const targets = await getSlaTargets();
+    const now = Date.now();
+    const today = localDay(now);
+    const weekStart = localDay(now - 6 * 86400000);
+    const d = new Date(now);
+    const monthStart = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-01`;
 
-    const byStatus = await db.pAll(
-      `SELECT status, COUNT(*) c FROM tickets WHERE ${W} GROUP BY status`,
-      P,
-    );
-    const byUrgency = await db.pAll(
-      `SELECT urgency, COUNT(*) c FROM tickets WHERE ${W} GROUP BY urgency`,
-      P,
-    );
-    const byDept = await db.pAll(
-      `SELECT department, COUNT(*) c FROM tickets WHERE ${W} GROUP BY department`,
-      P,
-    );
-    const byBrand = await db.pAll(
-      `SELECT brand_code, COUNT(*) c FROM tickets WHERE ${W} GROUP BY brand_code`,
-      P,
-    );
-    const byRegion = await db.pAll(
-      `SELECT COALESCE(region,'Jakarta') region, COUNT(*) c FROM tickets WHERE ${W} GROUP BY COALESCE(region,'Jakarta')`,
-      P,
-    );
-    const byOutlet = await db.pAll(
-      `SELECT outlet_code, COUNT(*) c FROM tickets WHERE ${W} GROUP BY outlet_code ORDER BY c DESC LIMIT 10`,
-      P,
-    );
-    const byTechnician = await db.pAll(
-      `SELECT assignee_name, COUNT(*) c FROM tickets
-       WHERE ${W} AND assigned_technician_id IS NOT NULL
-       GROUP BY assignee_name ORDER BY c DESC LIMIT 10`,
-      P,
-    );
-    const topCategories = await db.pAll(
-      `SELECT department, category, COUNT(*) c FROM tickets WHERE ${W} GROUP BY department, category ORDER BY c DESC LIMIT 8`,
-      P,
-    );
+    const byStatus = new Map();
+    const byUrgency = new Map();
+    const byDept = new Map();
+    const byBrand = new Map();
+    const byRegion = new Map();
+    const byOutlet = new Map();
+    const byTech = new Map();
+    const byCat = new Map();
+    const groups = Object.fromEntries(STATUS_GROUPS.map((g) => [g, 0]));
+    const backlogUrgency = Object.fromEntries(URGENCIES.map((u) => [u, 0]));
+    const aging = { lt1d: 0, d1to3: 0, d3to7: 0, gt7d: 0 };
+    const trendDays = [];
+    for (let i = 13; i >= 0; i--) trendDays.push(localDay(now - i * 86400000));
+    const trend = new Map(trendDays.map((k) => [k, { day: k, created: 0, closed: 0 }]));
 
-    // Grouped counts for the core dashboard cards. Grouping is read-side only:
-    // an "Open" card counts Open/Assigned/On Scheduled/Waiting */Pending/
-    // Escalated tickets without touching their stored status.
-    const groupCount = (g) => {
-      const members = statusesInGroup(g);
-      if (!members.length) return 0;
-      return one(
-        ` AND status IN (${members.map(() => "?").join(",")})`,
-        members,
-      );
-    };
-    const byStatusGroup = [];
-    for (const g of STATUS_GROUPS) {
-      byStatusGroup.push({ status_group: g, c: await groupCount(g) });
+    let total = 0, backlog = 0, unassigned = 0, createdToday = 0, createdWeek = 0,
+      createdMonth = 0, closedToday = 0, closedWeek = 0, criticalOpen = 0,
+      slaMet = 0, slaBreached = 0, slaAtRisk = 0, overdueOpen = 0, scheduledToday = 0;
+    const resHours = [];
+    const frMins = [];
+    const enriched = [];
+
+    for (const t of rows) {
+      total++;
+      const e = enrichTicket(t, targets, now);
+      enriched.push(e);
+      countInto(byStatus, t.status);
+      countInto(byUrgency, t.urgency);
+      countInto(byDept, t.department);
+      countInto(byBrand, t.brand_code);
+      countInto(byRegion, t.region);
+      countInto(byOutlet, t.outlet_code);
+      if (t.assigned_technician_id) countInto(byTech, t.assignee_name);
+      if (t.category) countInto(byCat, `${t.department || ""}||${t.category}`);
+      groups[statusGroup(t.status)] += 1;
+
+      const created = parseMs(t.created_at);
+      const createdDay = created != null ? localDay(created) : null;
+      if (createdDay === today) createdToday++;
+      if (createdDay && createdDay >= weekStart) createdWeek++;
+      if (createdDay && createdDay >= monthStart) createdMonth++;
+      if (createdDay && trend.has(createdDay)) trend.get(createdDay).created++;
+
+      const finished = parseMs(t.closed_at) ?? parseMs(t.resolved_at);
+      const isDone = ["Resolved", "Closed"].includes(t.status);
+      if (isDone && finished != null) {
+        const fd = localDay(finished);
+        if (fd === today) closedToday++;
+        if (fd >= weekStart) closedWeek++;
+        if (trend.has(fd)) trend.get(fd).closed++;
+        if (created != null) resHours.push((finished - created) / 3600000);
+      }
+      if (e.first_response_mins != null) frMins.push(e.first_response_mins);
+
+      const isBacklog = !TERMINAL_STATUSES.includes(t.status);
+      if (isBacklog) {
+        backlog++;
+        if (!t.assigned_technician_id) unassigned++;
+        if (backlogUrgency[t.urgency] != null) backlogUrgency[t.urgency]++;
+        if (t.urgency === "Critical" && t.status !== "Resolved") criticalOpen++;
+        const ageH = e.aging_minutes != null ? e.aging_minutes / 60 : 0;
+        if (t.status !== "Resolved") {
+          if (ageH < 24) aging.lt1d++;
+          else if (ageH < 72) aging.d1to3++;
+          else if (ageH < 168) aging.d3to7++;
+          else aging.gt7d++;
+        }
+        if (e.sla_status === "Breached" && t.status !== "Resolved") overdueOpen++;
+      }
+      if (e.sla_status === "Met") slaMet++;
+      else if (e.sla_status === "Breached") slaBreached++;
+      else if (e.sla_status === "At Risk") slaAtRisk++;
+      if (t.status === "On Scheduled" && t.scheduled_at && scheduleDay(t.scheduled_at) === today)
+        scheduledToday++;
     }
-    const groupTotals = Object.fromEntries(
-      byStatusGroup.map((r) => [r.status_group, r.c]),
-    );
-
-    const total = await one("");
-    const backlog = await one(` AND status NOT IN ('Closed','Cancelled')`);
-    const newCount = groupTotals["New"];
-    const unassigned = await one(
-      ` AND assigned_technician_id IS NULL AND status NOT IN ('Closed','Cancelled')`,
-    );
-    const assigned = await one(` AND status = 'Assigned'`);
-    const onScheduled = await one(` AND status = 'On Scheduled'`);
-    const waitingSparepart = await one(` AND status = 'Waiting Sparepart'`);
-    const waitingVendor = await one(` AND status = 'Waiting Vendor'`);
-    const pendingOutlet = await one(` AND status = 'Pending Outlet Response'`);
-    const escalated = await one(` AND status = 'Escalated'`);
-    const waiting = waitingSparepart + waitingVendor;
-    const onProgress = await one(` AND status = 'On Progress'`);
-    const resolved = await one(` AND status = 'Resolved'`);
-    const closed = await one(` AND status = 'Closed'`);
-    const cancelled = groupTotals["Cancelled"];
-    const createdToday = await one(
-      ` AND date(created_at) = date('now','localtime')`,
-    );
-    const createdWeek = await one(
-      ` AND date(created_at) >= date('now','localtime','-6 days')`,
-    );
-    const createdMonth = await one(
-      ` AND date(created_at) >= date('now','localtime','start of month')`,
-    );
-
-    // Avg resolution time (hrs) over resolved/closed with timestamps.
-    const avg = await db.pGet(
-      `SELECT AVG((julianday(COALESCE(closed_at, resolved_at)) - julianday(created_at)) * 24) h
-       FROM tickets WHERE ${W} AND (resolved_at IS NOT NULL OR closed_at IS NOT NULL)`,
-      P,
-    );
-    // Avg first response time (minutes)
-    const fr = await db.pGet(
-      `SELECT AVG((julianday(first_response_at) - julianday(created_at)) * 1440) m
-       FROM tickets WHERE ${W} AND first_response_at IS NOT NULL`,
-      P,
-    );
-
-    // SLA achievement — resolution time vs urgency target (configurable defaults).
-    const slaRows = await db.pAll(
-      `SELECT urgency,
-         (julianday(COALESCE(resolved_at, closed_at)) - julianday(created_at)) * 1440 AS mins
-       FROM tickets
-       WHERE ${W} AND (resolved_at IS NOT NULL OR closed_at IS NOT NULL)`,
-      P,
-    );
-    let slaMet = 0,
-      slaBreached = 0;
-    for (const r of slaRows) {
-      const target = SLA_TARGET_MINUTES[r.urgency] || SLA_TARGET_MINUTES.Medium;
-      if (r.mins != null && r.mins <= target) slaMet++;
-      else slaBreached++;
-    }
+    const exact = (s) => byStatus.get(s) || 0;
     const slaTotal = slaMet + slaBreached;
-    const slaAchievement = slaTotal
-      ? Math.round((slaMet / slaTotal) * 1000) / 10
-      : null;
+    const avgRes = avg(resHours, 1);
+    const avgFr = avg(frMins, 0);
 
-    // Technician workload (admins only)
+    // Technician workload (admins): one grouped query, idle technicians included.
     let workload = [];
     if (isAdmin(req.user)) {
-      const deptFilter =
+      const roleFilter =
         req.user.role === "AdminIT"
-          ? "AND role='TechnicianIT'"
+          ? "u.role = 'TechnicianIT'"
           : req.user.role === "AdminME"
-            ? "AND role='TechnicianME'"
-            : "AND role IN ('TechnicianIT','TechnicianME')";
-      const techs = await db.pAll(
-        `SELECT id, username, role FROM users WHERE is_active=1 ${deptFilter}`,
-      );
-      for (const t of techs) {
-        const c = (
-          await db.pGet(
-            `SELECT COUNT(*) c FROM tickets WHERE assigned_technician_id=? AND status IN (${OPEN_ASSIGNED_STATUSES.map(() => "?").join(",")})`,
-            [t.id, ...OPEN_ASSIGNED_STATUSES],
+            ? "u.role = 'TechnicianME'"
+            : "u.role IN ('TechnicianIT','TechnicianME')";
+      workload = (
+        await db.pAll(
+          `SELECT u.username AS technician, u.role,
+                  COUNT(t.id) AS open,
+                  SUM(CASE WHEN t.urgency IN ('Critical','High') THEN 1 ELSE 0 END) AS urgent,
+                  SUM(CASE WHEN t.status = 'On Progress' THEN 1 ELSE 0 END) AS in_progress
+             FROM users u
+             LEFT JOIN tickets t
+               ON t.assigned_technician_id = u.id
+              AND t.status IN (${OPEN_ASSIGNED_STATUSES.map(() => "?").join(",")})
+            WHERE u.is_active = 1 AND ${roleFilter}
+            GROUP BY u.id
+            ORDER BY open DESC, u.username COLLATE NOCASE`,
+          OPEN_ASSIGNED_STATUSES,
+        )
+      ).map((w) => ({
+        technician: w.technician,
+        department: deptForRole(w.role),
+        open: w.open,
+        urgent: w.urgent || 0,
+        in_progress: w.in_progress || 0,
+      }));
+    }
+
+    // Personal numbers for technicians: tickets they are on (PIC or collaborator).
+    let mine = null;
+    if (isTechnician(req.user)) {
+      const teamIds = new Set(
+        (
+          await db.pAll(
+            "SELECT ticket_id FROM ticket_assignments WHERE technician_id = ? AND (active = 1 OR is_active = 1)",
+            [req.user.id],
           )
-        ).c;
-        workload.push({
-          technician: t.username,
-          department: deptForRole(t.role),
-          open: c,
-        });
-      }
-      workload.sort((a, b) => b.open - a.open);
+        ).map((r) => r.ticket_id),
+      );
+      const my = enriched.filter((t) => t.assigned_technician_id === req.user.id || teamIds.has(t.id));
+      const myOpen = my.filter((t) => !["Resolved", "Closed", "Cancelled"].includes(t.status));
+      mine = {
+        open: myOpen.length,
+        on_progress: myOpen.filter((t) => t.status === "On Progress").length,
+        waiting: myOpen.filter((t) => WAITING_STATUSES.includes(t.status)).length,
+        scheduled: myOpen.filter((t) => t.status === "On Scheduled").length,
+        overdue: myOpen.filter((t) => t.sla_status === "Breached").length,
+        done_week: my.filter((t) => {
+          const f = parseMs(t.closed_at) ?? parseMs(t.resolved_at);
+          return ["Resolved", "Closed"].includes(t.status) && f != null && localDay(f) >= weekStart;
+        }).length,
+        unassigned_pic: rows.filter((t) => !t.assigned_technician_id && !TERMINAL_STATUSES.includes(t.status)).length,
+      };
+    }
+
+    // Outlet display names for the top-outlet list.
+    const topOutlets = topN(byOutlet, 10, "outlet_code");
+    if (topOutlets.length) {
+      const names = await db.pAll(
+        `SELECT code, COALESCE(display_label, name, code) AS label FROM outlets WHERE code IN (${topOutlets.map(() => "?").join(",")})`,
+        topOutlets.map((o) => o.outlet_code),
+      );
+      const m = new Map(names.map((n) => [n.code, n.label]));
+      for (const o of topOutlets) o.label = m.get(o.outlet_code) || o.outlet_code;
     }
 
     res.json({
       role: req.user.role,
+      generated_at: new Date(now).toISOString(),
       totals: {
         total,
-        // Core cards (grouped) — New / Open / On Progress / Closed.
-        new: newCount,
-        open: groupTotals["Open"],
-        on_progress: onProgress,
-        // Closed card groups Resolved + Closed; `status_closed` is the exact
-        // Closed count for reporting parity.
-        closed: groupTotals["Closed"],
-        cancelled,
-        // Everything still open (any status except Closed/Cancelled).
+        new: groups.New,
+        open: groups.Open,
+        on_progress: exact("On Progress"),
+        closed: groups.Closed,
+        cancelled: groups.Cancelled,
         backlog,
         unassigned,
-        // Operational detail — exact statuses, never rolled up. These keep the
-        // scheduling / sparepart / vendor / escalation views visible.
-        assigned,
-        on_scheduled: onScheduled,
-        waiting_sparepart: waitingSparepart,
-        waiting_vendor: waitingVendor,
-        pending_outlet_response: pendingOutlet,
-        escalated,
-        waiting,
-        resolved,
-        status_closed: closed,
+        assigned: exact("Assigned"),
+        on_scheduled: exact("On Scheduled"),
+        waiting_sparepart: exact("Waiting Sparepart"),
+        waiting_vendor: exact("Waiting Vendor"),
+        pending_outlet_response: exact("Pending Outlet Response"),
+        escalated: exact("Escalated"),
+        waiting: exact("Waiting Sparepart") + exact("Waiting Vendor"),
+        resolved: exact("Resolved"),
+        status_closed: exact("Closed"),
         created_today: createdToday,
         created_week: createdWeek,
         created_month: createdMonth,
+        closed_today: closedToday,
+        closed_week: closedWeek,
+        critical_open: criticalOpen,
+        overdue_open: overdueOpen,
+        scheduled_today: scheduledToday,
       },
-      avg_resolution_hours: avg && avg.h ? Math.round(avg.h * 10) / 10 : null,
-      avg_first_response_mins: fr && fr.m ? Math.round(fr.m) : null,
+      avg_resolution_hours: avgRes,
+      avg_first_response_mins: avgFr,
       sla: {
         met: slaMet,
         breached: slaBreached,
-        achievement: slaAchievement,
-        targets: SLA_TARGET_MINUTES,
+        at_risk: slaAtRisk,
+        achievement: slaTotal ? Math.round((slaMet / slaTotal) * 1000) / 10 : null,
+        targets,
       },
-      byStatus,
-      byStatusGroup,
-      byUrgency,
-      byDept,
-      byBrand,
-      byRegion,
-      byOutlet,
-      byTechnician,
-      topCategories,
+      aging,
+      backlogUrgency,
+      trend: [...trend.values()],
+      byStatus: STATUSES.filter((s) => byStatus.has(s))
+        .map((s) => ({ status: s, c: byStatus.get(s) }))
+        .concat([...byStatus.entries()].filter(([s]) => s && !STATUSES.includes(s)).map(([s, c]) => ({ status: s, c }))),
+      byStatusGroup: STATUS_GROUPS.map((g) => ({ status_group: g, c: groups[g] })),
+      byUrgency: URGENCIES.map((u) => ({ urgency: u, c: byUrgency.get(u) || 0 })),
+      byDept: topN(byDept, 10, "department"),
+      byBrand: topN(byBrand, 20, "brand_code"),
+      byRegion: topN(byRegion, 10, "region"),
+      byOutlet: topOutlets,
+      byTechnician: topN(byTech, 10, "assignee_name"),
+      topCategories: topN(byCat, 8, "key").map(({ key, c }) => {
+        const [department, category] = key.split("||");
+        return { department: department || null, category, c };
+      }),
       workload,
+      mine,
     });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to build dashboard" });
+    sendError(res, e, "Failed to build dashboard");
   }
 });
 
@@ -505,19 +559,17 @@ router.get(
     try {
       const ticket = await getVisibleTicket(req.user, req.params.id);
       if (!ticket)
-        return res
-          .status(404)
-          .json({ error: "Ticket not found or access denied" });
+        return res.status(404).json({ error: "Ticket not found or access denied" });
       if (!adminScopeForTicket(req.user, ticket))
         return res.status(403).json({ error: "Wrong department" });
-      const recs = await recommendTechnicians(db, {
-        department: ticket.department,
-        categoryName: ticket.category,
-      });
-      res.json(recs);
+      res.json(
+        await recommendTechnicians(db, {
+          department: ticket.department,
+          categoryName: ticket.category,
+        }),
+      );
     } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: "Failed to compute recommendation" });
+      sendError(res, e, "Failed to compute recommendation");
     }
   },
 );
@@ -525,127 +577,126 @@ router.get(
 // --- Comments (human) ------------------------------------------------------
 router.post("/api/tickets/:id/comments", requireAuth, async (req, res) => {
   try {
-    const ticket = await getVisibleTicket(req.user, req.params.id);
+    const ticket = await getVisibleTicket(req.user, req.params.id, { techFilter: "all" });
     if (!ticket)
-      return res
-        .status(404)
-        .json({ error: "Ticket not found or access denied" });
-    // Leaders are strictly view-only.
+      return res.status(404).json({ error: "Ticket not found or access denied" });
     if (req.user.role === "Leader")
       return res.status(403).json({ error: "View-only role cannot comment" });
 
-    const { message, attachmentIds, phase } = req.body || {};
-    if (!message && !(Array.isArray(attachmentIds) && attachmentIds.length)) {
-      return res
-        .status(400)
-        .json({ error: "A message or attachment is required" });
+    const body = req.body || {};
+    const message = optStr(body.message, LIMITS.note * 2, "Message");
+    const ids = normalizeIds(body.attachmentIds);
+    if (!message && !ids.length)
+      return res.status(400).json({ error: "A message or attachment is required" });
+
+    // Only the caller's own, not-yet-linked uploads can be attached.
+    let owned = [];
+    if (ids.length) {
+      owned = (
+        await db.pAll(
+          `SELECT id FROM attachments WHERE id IN (${ids.map(() => "?").join(",")})
+             AND ticket_id IS NULL AND uploaded_by = ?`,
+          [...ids, req.user.id],
+        )
+      ).map((r) => r.id);
+      if (!owned.length && !message)
+        return res.status(400).json({ error: "Those attachments are no longer available. Please upload them again." });
     }
 
-    // Author identity is ALWAYS from the authenticated user (no spoofing).
     const r = await db.pRun(
       `INSERT INTO comments (ticket_id, author_name, author_role, author_user_id, message, is_system)
        VALUES (?, ?, ?, ?, ?, 0)`,
-      [
-        ticket.id,
-        req.user.username,
-        req.user.role,
-        req.user.id,
-        message || "(attachment)",
-      ],
+      [ticket.id, req.user.username, req.user.role, req.user.id, message || "(attachment)"],
     );
     const commentId = r.lastID;
 
-    if (Array.isArray(attachmentIds) && attachmentIds.length) {
-      const validPhase = ["before", "after", "general"].includes(phase)
-        ? phase
-        : "general";
-      const ph = attachmentIds.map(() => "?").join(",");
+    if (owned.length) {
+      const phase = ["before", "after", "general"].includes(body.phase) ? body.phase : "general";
       await db.pRun(
-        `UPDATE attachments SET ticket_id = ?, comment_id = ?, phase = ? WHERE id IN (${ph})`,
-        [ticket.id, commentId, validPhase, ...attachmentIds],
+        `UPDATE attachments SET ticket_id = ?, comment_id = ?, phase = ?
+          WHERE id IN (${owned.map(() => "?").join(",")}) AND ticket_id IS NULL`,
+        [ticket.id, commentId, phase, ...owned],
       );
     }
 
-    // First agent/admin/tech response marks first_response_at.
-    if (!ticket.first_response_at && req.user.role !== "Requestor") {
-      await db.pRun(
-        "UPDATE tickets SET first_response_at = CURRENT_TIMESTAMP WHERE id = ?",
-        [ticket.id],
-      );
-    }
+    // First staff response marks first_response_at.
+    const staffReply = req.user.role !== "Requestor" && !ticket.first_response_at;
     await db.pRun(
-      "UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      `UPDATE tickets SET updated_at = CURRENT_TIMESTAMP${staffReply ? ", first_response_at = CURRENT_TIMESTAMP" : ""} WHERE id = ?`,
       [ticket.id],
     );
     await logActivity(
       ticket.id,
       req.user,
       "comment.added",
-      message ? message.slice(0, 80) : "(attachment)",
+      message ? message.slice(0, 80) : `${owned.length} attachment(s)`,
     );
 
-    res
-      .status(201)
-      .json(await db.pGet("SELECT * FROM comments WHERE id = ?", [commentId]));
+    res.status(201).json(await db.pGet("SELECT * FROM comments WHERE id = ?", [commentId]));
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to add comment" });
+    sendError(res, e, "Failed to add comment");
   }
 });
 
-/* Activity-log wording for a status change. Plain language, in one sentence, so
-   the timeline reads without decoding:
-     "T TechIT changed status from Open to On Progress."
-     "T TechIT marked ticket as Waiting Sparepart. Note: waiting thermal head."
-     "T TechIT marked ticket as Resolved."
-   Statuses that describe a *state of the work* read better as "marked ticket
-   as X"; ordinary moves along the flow read better as "from A to B". */
-const MARKED_AS_STATUSES = [
-  ...WAITING_STATUSES,
-  "On Scheduled",
-  "Escalated",
-  "Resolved",
-  "Cancelled",
-];
+/* Activity-log wording for a status change, in one plain sentence. */
+const MARKED_AS_STATUSES = [...WAITING_STATUSES, "On Scheduled", "Escalated", "Resolved", "Cancelled"];
 function statusChangeDetail(user, from, to, body = {}) {
   const who = actorLabel(user);
-  const note = (
+  const note = String(
     body.status_note ||
-    (to === "Waiting Sparepart" && body.sparepart_note) ||
-    (to === "Waiting Vendor" && body.vendor_note) ||
-    ""
+      (to === "Waiting Sparepart" && body.sparepart_note) ||
+      (to === "Waiting Vendor" && body.vendor_note) ||
+      (to === "Cancelled" && body.cancel_reason) ||
+      (TERMINAL_STATUSES.includes(from) && (body.reopen_reason || body.reason)) ||
+      "",
   )
-    .toString()
-    .trim();
-  const sentence = MARKED_AS_STATUSES.includes(to)
-    ? `${who} marked ticket as ${to}.`
-    : `${who} changed status from ${from} to ${to}.`;
-  return note ? `${sentence} Note: ${note}` : sentence;
+    .trim()
+    .slice(0, 300);
+  const reopening = TERMINAL_STATUSES.includes(from) && !TERMINAL_STATUSES.includes(to);
+  const sentence = reopening
+    ? `${who} reopened the ticket (${from} → ${to}).`
+    : MARKED_AS_STATUSES.includes(to)
+      ? `${who} marked ticket as ${to}.`
+      : `${who} changed status from ${from} to ${to}.`;
+  const label = reopening ? "Reason" : to === "Cancelled" ? "Reason" : "Note";
+  return note ? `${sentence} ${label}: ${note}` : sentence;
 }
+
+// Free-text operational fields and their validators.
+const TEXT_FIELDS = {
+  resolution_note: (v) => optStr(v, LIMITS.note, "Resolution note"),
+  cancel_reason: (v) => optStr(v, LIMITS.note, "Cancel reason"),
+  sparepart_note: (v) => optStr(v, LIMITS.short, "Sparepart note"),
+  vendor_note: (v) => optStr(v, LIMITS.short, "Vendor note"),
+  expected_part_date: (v) => optDateTime(v, "Expected date"),
+  estimated_cost: (v) => {
+    if (v === undefined || v === null || String(v).trim() === "") return null;
+    const n = Number(String(v).replace(/[,\s]/g, ""));
+    if (!Number.isFinite(n) || n < 0) throw new ValidationError("Estimated cost must be a positive number.");
+    return n;
+  },
+  location_detail: (v) => optStr(v, LIMITS.short, "Location"),
+  device_equipment: (v) => optStr(v, LIMITS.short, "Device"),
+  business_impact: (v) => optStr(v, LIMITS.short, "Business impact"),
+  contact_number: (v) => optPhone(v, "Contact number"),
+  preferred_visit_time: (v) => optStr(v, LIMITS.short, "Preferred visit time"),
+  scheduled_at: (v) => optDateTime(v, "Scheduled time"),
+  scheduled_end: (v) => optDateTime(v, "Scheduled end"),
+};
 
 router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
   try {
-    const ticket = await getVisibleTicket(req.user, req.params.id);
+    const ticket = await getVisibleTicket(req.user, req.params.id, { techFilter: "all" });
     if (!ticket)
-      return res
-        .status(404)
-        .json({ error: "Ticket not found or access denied" });
+      return res.status(404).json({ error: "Ticket not found or access denied" });
 
     const b = req.body || {};
     const isDeptAdmin = adminScopeForTicket(req.user, ticket);
 
-    /* Technician edit rights — a technician may act on a ticket when they are
-       on its assignment team, in EITHER role:
-         • Primary Technician / PIC  — owns the job
-         • Collaborator              — helping on the job, and often the one who
-                                       actually sees the field condition
-       …and the ticket is in their own department (Technician IT can never touch
-       an ME ticket and vice versa). An unassigned technician gets nothing. */
-    const teamRole = isTechnician(req.user)
-      ? await teamRoleOf(ticket, req.user.id)
-      : null;
-    const isTeamTech =
-      !!teamRole && technicianDeptMatches(req.user, ticket);
+    /* A technician may act on a ticket when they are on its team (Primary/PIC
+       or Collaborator) AND it is in their own department. */
+    const teamRole = isTechnician(req.user) ? await teamRoleOf(ticket, req.user.id) : null;
+    const isTeamTech = !!teamRole && technicianDeptMatches(req.user, ticket);
     if (!isDeptAdmin && !isTeamTech) {
       return res.status(403).json({
         error: isTechnician(req.user)
@@ -654,172 +705,132 @@ router.patch("/api/tickets/:id", requireAuth, async (req, res) => {
       });
     }
 
-    const updates = [];
-    const params = [];
-    const set = (col, val) => {
-      updates.push(`${col} = ?`);
-      params.push(val);
-    };
+    // Column → value; a Map so a column can never appear twice in the UPDATE.
+    const changes = new Map();
     const activities = [];
+    const nowIso = new Date().toISOString();
+
+    // Validate free-text fields up-front (400 before anything is written).
+    const text = {};
+    for (const [f, check] of Object.entries(TEXT_FIELDS)) {
+      if (b[f] !== undefined) text[f] = check(b[f]);
+    }
 
     // Status change (with guards + timestamps)
     if (b.status && b.status !== ticket.status) {
-      // A technician on the team owns the whole operational middle of the flow
-      // (TECHNICIAN_STATUSES) — not just the 4 core statuses. What stays out of
-      // their hands: "New" (system-set), "Cancelled" (admin + reason) and
-      // reopening a Closed/Cancelled ticket (admin + reason).
       if (isTeamTech && !isDeptAdmin) {
-        if (TERMINAL_STATUSES.includes(ticket.status)) {
+        if (TERMINAL_STATUSES.includes(ticket.status))
           return res.status(403).json({
             error: `This ticket is already ${ticket.status === "Closed" ? "closed" : "cancelled"}.`,
           });
-        }
-        if (!TECHNICIAN_STATUSES.includes(b.status)) {
-          return res
-            .status(403)
-            .json({ error: "Technicians cannot set that status" });
-        }
+        if (!TECHNICIAN_STATUSES.includes(b.status))
+          return res.status(403).json({ error: "Technicians cannot set that status" });
       }
-      if (b.status === "Closed" && !canClose(req.user, ticket, { isTeamMember: isTeamTech })) {
-        return res
-          .status(403)
-          .json({ error: "You are not allowed to close this ticket" });
-      }
-      const err = validateTransition(ticket, b.status, b, req.user, {
-        isTeamMember: isTeamTech,
-      });
+      if (b.status === "Closed" && !canClose(req.user, ticket, { isTeamMember: isTeamTech }))
+        return res.status(403).json({ error: "You are not allowed to close this ticket" });
+      const err = validateTransition(
+        ticket,
+        b.status,
+        { ...b, resolution_note: text.resolution_note ?? b.resolution_note },
+        req.user,
+        { isTeamMember: isTeamTech },
+      );
       if (err) return res.status(400).json({ error: err });
 
-      set("status", b.status);
-      const nowIso = new Date().toISOString();
-      // On Scheduled: record the planned schedule date/time if supplied.
-      // No schedule supplied is fine — it must never block the status update.
-      if (b.status === "On Scheduled" && b.scheduled_at)
-        set("scheduled_at", b.scheduled_at);
-      if (b.status === "On Progress" && !ticket.started_at)
-        set("started_at", nowIso);
-      if (b.status === "Resolved" && !ticket.resolved_at)
-        set("resolved_at", nowIso);
-      if (b.status === "Closed" && !ticket.closed_at) set("closed_at", nowIso);
-      if (ticket.status === "Closed" && b.status !== "Closed")
-        set("closed_at", null);
-      // Nothing in this block touches assigned_technician_id / assignee_name or
-      // any ticket_assignments row: a status change never moves the team.
-      activities.push([
-        "status.changed",
-        statusChangeDetail(req.user, ticket.status, b.status, b),
-      ]);
+      changes.set("status", b.status);
+      if (b.status === "On Progress" && !ticket.started_at) changes.set("started_at", nowIso);
+      if (b.status === "Resolved" && !ticket.resolved_at) changes.set("resolved_at", nowIso);
+      if (b.status === "Closed") {
+        if (!ticket.closed_at) changes.set("closed_at", nowIso);
+        if (!ticket.resolved_at) changes.set("resolved_at", nowIso);
+      }
+      // Reopened / sent back to work: the old finish timestamps no longer hold,
+      // otherwise SLA and resolution time would be measured to a stale point.
+      if (!["Resolved", "Closed", "Cancelled"].includes(b.status)) {
+        if (ticket.closed_at) changes.set("closed_at", null);
+        if (ticket.resolved_at) changes.set("resolved_at", null);
+      }
+      activities.push(["status.changed", statusChangeDetail(req.user, ticket.status, b.status, b)]);
     }
 
-    if (
-      b.urgency &&
-      URGENCIES.includes(b.urgency) &&
-      b.urgency !== ticket.urgency
-    ) {
+    if (b.urgency && URGENCIES.includes(b.urgency) && b.urgency !== ticket.urgency) {
       if (!isDeptAdmin)
-        return res
-          .status(403)
-          .json({ error: "Only admins can change urgency" });
-      set("urgency", b.urgency);
+        return res.status(403).json({ error: "Only admins can change urgency" });
+      changes.set("urgency", b.urgency);
       activities.push(["urgency.changed", `${ticket.urgency} → ${b.urgency}`]);
     }
 
-    // Department / category re-routing (admin only)
-    if (
-      b.department &&
-      DEPARTMENTS.includes(b.department) &&
-      b.department !== ticket.department
-    ) {
+    // Department / category re-routing
+    const newDept =
+      b.department && DEPARTMENTS.includes(b.department) && b.department !== ticket.department
+        ? b.department
+        : null;
+    if (newDept) {
       if (!isDeptAdmin)
-        return res
-          .status(403)
-          .json({ error: "Only admins can re-route department" });
-      set("department", b.department);
-      activities.push([
-        "department.changed",
-        `${ticket.department} → ${b.department} (escalation)`,
-      ]);
-      // keep original ticket_number (same-ticket escalation), clear assignee if wrong dept
+        return res.status(403).json({ error: "Only admins can re-route department" });
+      changes.set("department", newDept);
+      activities.push(["department.changed", `${ticket.department} → ${newDept} (escalation)`]);
     }
-    if (b.category) {
-      const dept = b.department || ticket.department;
+    const dept = newDept || ticket.department;
+    const wantedCategory = b.category ? String(b.category) : newDept ? ticket.category : null;
+    if (wantedCategory) {
       const ok = await db.pGet(
         "SELECT 1 FROM categories WHERE department_code = ? AND name = ?",
-        [dept, b.category],
+        [dept, wantedCategory],
       );
       if (!ok)
-        return res
-          .status(400)
-          .json({ error: "Category does not belong to the ticket department" });
-      if (b.category !== ticket.category) {
-        set("category", b.category);
-        activities.push([
-          "category.changed",
-          `${ticket.category} → ${b.category}`,
-        ]);
+        return res.status(400).json({
+          error: newDept && !b.category
+            ? `Pick a ${dept} category when moving this ticket to ${dept}.`
+            : "Category does not belong to the ticket department",
+        });
+      if (wantedCategory !== ticket.category) {
+        if (!isDeptAdmin && !isTeamTech)
+          return res.status(403).json({ error: "You cannot change the category" });
+        changes.set("category", wantedCategory);
+        activities.push(["category.changed", `${ticket.category} → ${wantedCategory}`]);
       }
     }
     if (b.outlet_code && b.outlet_code !== ticket.outlet_code) {
       if (!isDeptAdmin)
         return res.status(403).json({ error: "Only admins can change outlet" });
-      const o = await db.pGet(
-        "SELECT brand_code, region FROM outlets WHERE code = ?",
-        [b.outlet_code],
-      );
+      const o = await db.pGet("SELECT brand_code, region FROM outlets WHERE code = ?", [b.outlet_code]);
       if (!o) return res.status(400).json({ error: "Unknown outlet" });
-      set("outlet_code", b.outlet_code);
-      set("brand_code", o.brand_code);
-      set("region", o.region || "Jakarta");
-      activities.push([
-        "outlet.changed",
-        `${ticket.outlet_code} → ${b.outlet_code}`,
-      ]);
+      changes.set("outlet_code", b.outlet_code);
+      changes.set("brand_code", o.brand_code);
+      changes.set("region", o.region || "Jakarta");
+      activities.push(["outlet.changed", `${ticket.outlet_code} → ${b.outlet_code}`]);
     }
 
-    // Free-text operational fields
-    const textFields = [
-      "resolution_note",
-      "cancel_reason",
-      "sparepart_note",
-      "vendor_note",
-      "expected_part_date",
-      "estimated_cost",
-      "location_detail",
-      "device_equipment",
-      "business_impact",
-      "contact_number",
-      "preferred_visit_time",
-      "scheduled_at",
-      "scheduled_end",
-    ];
-    for (const f of textFields) {
-      if (b[f] !== undefined && b[f] !== ticket[f]) set(f, b[f]);
+    for (const [f, v] of Object.entries(text)) {
+      if (v !== (ticket[f] ?? null) && !changes.has(f)) changes.set(f, v);
     }
+    const se = changes.has("scheduled_end") ? changes.get("scheduled_end") : ticket.scheduled_end;
+    const sa = changes.has("scheduled_at") ? changes.get("scheduled_at") : ticket.scheduled_at;
+    if (sa && se && Date.parse(String(se).replace(" ", "T")) < Date.parse(String(sa).replace(" ", "T")))
+      return res.status(400).json({ error: "Scheduled end must be after the scheduled start." });
 
-    if (!updates.length)
+    if (!changes.size)
       return res.status(400).json({ error: "No changes provided" });
-    set("updated_at", new Date().toISOString());
-    if (!ticket.first_response_at && isDeptAdmin)
-      set("first_response_at", new Date().toISOString());
+    changes.set("updated_at", nowIso);
+    if (!ticket.first_response_at && (isDeptAdmin || isTeamTech))
+      changes.set("first_response_at", nowIso);
 
-    await db.pRun(`UPDATE tickets SET ${updates.join(", ")} WHERE id = ?`, [
-      ...params,
-      ticket.id,
-    ]);
+    const cols = [...changes.keys()];
+    await db.pRun(
+      `UPDATE tickets SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      [...cols.map((c) => changes.get(c)), ticket.id],
+    );
     for (const [action, detail] of activities)
       await logActivity(ticket.id, req.user, action, detail);
 
-    const updated = await db.pGet("SELECT * FROM tickets WHERE id = ?", [
-      ticket.id,
-    ]);
-    res.json(updated);
+    const updated = await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]);
+    res.json(withSla(updated, await getSlaTargets(), Date.now()));
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to update ticket" });
+    sendError(res, e, "Failed to update ticket");
   }
 });
 
-// --- Assign / reassign -----------------------------------------------------
 // --- Assign / reassign / multi-technician assignment ------------------------
 router.post(
   "/api/tickets/:id/assign",
@@ -829,22 +840,26 @@ router.post(
     try {
       const ticket = await getVisibleTicket(req.user, req.params.id);
       if (!ticket)
-        return res
-          .status(404)
-          .json({ error: "Ticket not found or access denied" });
+        return res.status(404).json({ error: "Ticket not found or access denied" });
       if (!adminScopeForTicket(req.user, ticket))
         return res.status(403).json({ error: "Wrong department" });
 
       const { technician_id, action, role_type, reason, note, override } = req.body || {};
-      if (!technician_id) {
+      const techId = Number.parseInt(technician_id, 10);
+      if (!Number.isInteger(techId))
         return res.status(400).json({ error: "technician_id is required" });
-      }
-      const why = note || reason;
+      if (action && !["remove", "set_primary", "add_collaborator"].includes(action))
+        return res.status(400).json({ error: "Unknown action" });
+      if (role_type && !["primary", "collaborator"].includes(role_type))
+        return res.status(400).json({ error: "role_type must be primary or collaborator" });
+      if (action !== "remove" && TERMINAL_STATUSES.includes(ticket.status))
+        return res.status(400).json({ error: "Reopen the ticket before changing its team." });
+      const why = optStr(note || reason, LIMITS.short, "Note");
 
-      // "remove" is the only action that may target someone already on the team
-      // regardless of department, so it skips the assignable checks.
-      const loaded = await loadAssignableTechnician(technician_id, ticket, {
+      // "remove" may target anyone already on the team regardless of department.
+      const loaded = await loadAssignableTechnician(techId, ticket, {
         override: !!override || action === "remove",
+        allowInactive: action === "remove",
       });
       if (loaded.error)
         return res.status(loaded.status).json({ error: loaded.error });
@@ -853,41 +868,26 @@ router.post(
       const team = await getTeam(ticket.id);
       const targetRole =
         role_type ||
-        (action === "add_collaborator"
-          ? "collaborator"
-          : action === "set_primary"
-            ? "primary"
-            : null) ||
+        (action === "add_collaborator" ? "collaborator" : action === "set_primary" ? "primary" : null) ||
         (!team.primary ? "primary" : "collaborator");
 
       if (action === "remove") {
         const onTeam = team.active.some((a) => a.technician_id === tech.id);
         if (!onTeam)
-          return res
-            .status(400)
-            .json({ error: "This technician is not assigned to this ticket." });
+          return res.status(400).json({ error: "This technician is not assigned to this ticket." });
         await removeAssignment(ticket, tech, req.user);
       } else if (targetRole === "primary") {
         if (team.primary && team.primary.technician_id === tech.id)
-          return res
-            .status(400)
-            .json({ error: "This technician is already the Primary Technician." });
+          return res.status(400).json({ error: "This technician is already the Primary Technician." });
         await setPrimary(ticket, tech, req.user, why);
       } else {
-        // Collaborator — a technician is never on the team twice.
         if (team.primary && team.primary.technician_id === tech.id)
-          return res
-            .status(400)
-            .json({ error: "This technician is already the Primary Technician." });
+          return res.status(400).json({ error: "This technician is already the Primary Technician." });
         if (team.collaborators.some((c) => c.technician_id === tech.id))
-          return res
-            .status(400)
-            .json({ error: "This technician is already a Collaborator." });
+          return res.status(400).json({ error: "This technician is already a Collaborator." });
         const added = await addCollaborator(ticket, tech, req.user, why, "admin");
         if (!added.added)
-          return res
-            .status(400)
-            .json({ error: "This technician is already assigned to this ticket." });
+          return res.status(400).json({ error: "This technician is already assigned to this ticket." });
       }
 
       if (action !== "remove") {
@@ -899,32 +899,20 @@ router.post(
         });
       }
 
-      res.json(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]));
+      res.json(toClientTicket(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id])));
     } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: "Failed to update technician assignment" });
+      sendError(res, e, "Failed to update technician assignment");
     }
-  }
+  },
 );
 
 /* --------------------------------------------------------------------------
-   Collaborator invitations (technician-side)
-
-   GET  /api/tickets/:id/assignable-technicians  — candidates + availability
-   POST /api/tickets/:id/collaborators/invite    — invite one as Collaborator
-
-   Open to a dept admin OR a technician already on the ticket's team (Primary
-   or Collaborator). Everything else — requestors, unassigned technicians,
-   other-department technicians — is refused.
+   Collaborator invitations (technician-side). Open to a dept admin OR a
+   technician already on the ticket's team (Primary or Collaborator).
    -------------------------------------------------------------------------- */
-
-// Shared gate. Returns { ticket, isTeamAdmin } or { error, status }.
 async function loadTicketForCollaboration(req) {
-  const ticket = await getVisibleTicket(req.user, req.params.id, {
-    techFilter: "all",
-  });
-  if (!ticket)
-    return { error: "Ticket not found or access denied", status: 404 };
+  const ticket = await getVisibleTicket(req.user, req.params.id, { techFilter: "all" });
+  if (!ticket) return { error: "Ticket not found or access denied", status: 404 };
 
   const isTeamAdmin = adminScopeForTicket(req.user, ticket);
   if (isTeamAdmin) return { ticket, isTeamAdmin };
@@ -933,33 +921,41 @@ async function loadTicketForCollaboration(req) {
     return { error: "Only assigned technicians can invite collaborators.", status: 403 };
   if (deptForRole(req.user.role) !== ticket.department)
     return { error: "You can only invite technicians from the same department.", status: 403 };
-  const { active } = await getTeam(ticket.id);
-  const onTeam =
-    active.some((a) => a.technician_id === req.user.id) ||
-    ticket.assigned_technician_id === req.user.id;
-  if (!onTeam)
+  if (!(await teamRoleOf(ticket, req.user.id)))
     return { error: "Only assigned technicians can invite collaborators.", status: 403 };
   return { ticket, isTeamAdmin: false };
 }
 
-router.get(
-  "/api/tickets/:id/assignable-technicians",
-  requireAuth,
-  async (req, res) => {
-    try {
-      const loaded = await loadTicketForCollaboration(req);
-      if (loaded.error)
-        return res.status(loaded.status).json({ error: loaded.error });
-      const { ticket } = loaded;
+router.get("/api/tickets/:id/assignable-technicians", requireAuth, async (req, res) => {
+  try {
+    const loaded = await loadTicketForCollaboration(req);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error });
+    const { ticket } = loaded;
 
-      const { primary, collaborators } = await getTeam(ticket.id);
-      // Availability/workload come from the same engine the admin
-      // recommendation list uses, so both screens agree.
-      const ranked = await recommendTechnicians(db, {
+    const { primary, collaborators } = await getTeam(ticket.id);
+    const ranked = await recommendTechnicians(db, {
+      department: ticket.department,
+      categoryName: ticket.category,
+    });
+    res.json({
+      ticket: {
+        id: ticket.id,
+        ticket_number: ticket.ticket_number,
+        title: ticket.title,
         department: ticket.department,
-        categoryName: ticket.category,
-      });
-      const candidates = ranked.map((r) => ({
+        category: ticket.category,
+        outlet_code: ticket.outlet_code,
+        outlet_name: ticket.outlet_name || ticket.outlet_code,
+        status: ticket.status,
+      },
+      primary: primary
+        ? { technician_id: primary.technician_id, technician_name: primary.technician_name }
+        : null,
+      collaborators: collaborators.map((c) => ({
+        technician_id: c.technician_id,
+        technician_name: c.technician_name,
+      })),
+      candidates: ranked.map((r) => ({
         id: r.id,
         username: r.username,
         department: r.department || ticket.department,
@@ -969,314 +965,229 @@ router.get(
         is_self: r.id === req.user.id,
         is_primary: !!primary && primary.technician_id === r.id,
         is_collaborator: collaborators.some((c) => c.technician_id === r.id),
-      }));
+      })),
+    });
+  } catch (e) {
+    sendError(res, e, "Failed to list technicians");
+  }
+});
 
-      res.json({
-        ticket: {
-          id: ticket.id,
-          ticket_number: ticket.ticket_number,
-          title: ticket.title,
-          department: ticket.department,
-          category: ticket.category,
-          outlet_code: ticket.outlet_code,
-          outlet_name: ticket.outlet_name || ticket.outlet_code,
-          status: ticket.status,
-        },
-        primary: primary
-          ? { technician_id: primary.technician_id, technician_name: primary.technician_name }
-          : null,
-        collaborators: collaborators.map((c) => ({
-          technician_id: c.technician_id,
-          technician_name: c.technician_name,
-        })),
-        candidates,
-      });
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: "Failed to list technicians" });
-    }
-  },
-);
+router.post("/api/tickets/:id/collaborators/invite", requireAuth, async (req, res) => {
+  try {
+    const loaded = await loadTicketForCollaboration(req);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error });
+    const { ticket, isTeamAdmin } = loaded;
 
-router.post(
-  "/api/tickets/:id/collaborators/invite",
-  requireAuth,
-  async (req, res) => {
-    try {
-      const loaded = await loadTicketForCollaboration(req);
-      if (loaded.error)
-        return res.status(loaded.status).json({ error: loaded.error });
-      const { ticket, isTeamAdmin } = loaded;
+    if (TERMINAL_STATUSES.includes(ticket.status))
+      return res.status(400).json({ error: "This ticket is already closed or cancelled." });
 
-      if (TERMINAL_STATUSES.includes(ticket.status))
-        return res
-          .status(400)
-          .json({ error: "This ticket is already closed or cancelled." });
+    const { technician_id } = req.body || {};
+    const techId = Number.parseInt(technician_id, 10);
+    if (!Number.isInteger(techId))
+      return res.status(400).json({ error: "technician_id is required" });
+    if (techId === req.user.id)
+      return res.status(400).json({ error: "You are already assigned to this ticket." });
+    const note = optStr((req.body || {}).note, LIMITS.short, "Note");
 
-      const { technician_id, note } = req.body || {};
-      if (!technician_id)
-        return res.status(400).json({ error: "technician_id is required" });
-      if (Number(technician_id) === req.user.id)
-        return res
-          .status(400)
-          .json({ error: "You are already assigned to this ticket." });
+    const tech = await db.pGet(
+      "SELECT id, username, email, phone, role, is_active FROM users WHERE id = ?",
+      [techId],
+    );
+    if (!tech || !isTechnician({ role: tech.role }))
+      return res.status(400).json({ error: "Not a valid technician" });
+    if (tech.is_active === 0)
+      return res.status(400).json({ error: "Technician is inactive" });
+    if (deptForRole(tech.role) !== ticket.department)
+      return res.status(400).json({ error: "You can only invite technicians from the same department." });
 
-      const tech = await db.pGet(
-        "SELECT id, username, email, phone, role, is_active FROM users WHERE id = ?",
-        [technician_id],
-      );
-      if (!tech || !isTechnician({ role: tech.role }))
-        return res.status(400).json({ error: "Not a valid technician" });
-      if (tech.is_active === 0)
-        return res.status(400).json({ error: "Technician is inactive" });
-      // No override here — invites never cross departments, for admins either.
-      if (deptForRole(tech.role) !== ticket.department)
-        return res
-          .status(400)
-          .json({ error: "You can only invite technicians from the same department." });
+    const { primary, collaborators } = await getTeam(ticket.id);
+    if (primary && primary.technician_id === tech.id)
+      return res.status(400).json({ error: "This technician is already the Primary Technician." });
+    if (collaborators.some((c) => c.technician_id === tech.id))
+      return res.status(400).json({ error: "This technician is already a Collaborator." });
 
-      // Re-read the team immediately before inserting so a double-click cannot
-      // create two rows for the same technician.
-      const { primary, collaborators } = await getTeam(ticket.id);
-      if (primary && primary.technician_id === tech.id)
-        return res
-          .status(400)
-          .json({ error: "This technician is already the Primary Technician." });
-      if (collaborators.some((c) => c.technician_id === tech.id))
-        return res
-          .status(400)
-          .json({ error: "This technician is already a Collaborator." });
+    const added = await addCollaborator(ticket, tech, req.user, note, isTeamAdmin ? "admin" : "invite");
+    if (!added.added)
+      return res.status(400).json({ error: "This technician is already assigned to this ticket." });
 
-      const added = await addCollaborator(
-        ticket,
-        tech,
-        req.user,
-        note,
-        isTeamAdmin ? "admin" : "invite",
-      );
-      // Lost a race with a concurrent identical invite (double-click): the row
-      // already exists, so report it as such instead of inventing a duplicate.
-      if (!added.added)
-        return res
-          .status(400)
-          .json({ error: "This technician is already assigned to this ticket." });
+    notify("ticket.assigned", {
+      ticketId: ticket.id,
+      recipients: [{ name: tech.username, email: tech.email, phone: tech.phone }],
+      message: `${req.user.username} invited you as Collaborator on ticket ${ticket.ticket_number}`,
+      channels: ["in_app"],
+    });
 
-      notify("ticket.assigned", {
-        ticketId: ticket.id,
-        recipients: [{ name: tech.username, email: tech.email, phone: tech.phone }],
-        message: `${req.user.username} invited you as Collaborator on ticket ${ticket.ticket_number}`,
-        channels: ["in_app"],
-      });
-
-      const team = await getTeam(ticket.id);
-      res.status(201).json({
-        success: true,
-        collaborator: { technician_id: tech.id, technician_name: tech.username },
-        primaryTechnician: team.primary,
-        collaborators: team.collaborators,
-        // Status is untouched by an invite — echoed so the client can prove it.
-        status: ticket.status,
-      });
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: "Failed to invite collaborator" });
-    }
-  },
-);
+    const team = await getTeam(ticket.id);
+    res.status(201).json({
+      success: true,
+      collaborator: { technician_id: tech.id, technician_name: tech.username },
+      primaryTechnician: team.primary,
+      collaborators: team.collaborators,
+      status: ticket.status,
+    });
+  } catch (e) {
+    sendError(res, e, "Failed to invite collaborator");
+  }
+});
 
 // --- Self-assignment (technicians) -----------------------------------------
 router.post("/api/tickets/:id/assign-to-me", requireAuth, async (req, res) => {
   try {
     if (!isTechnician(req.user))
-      return res
-        .status(403)
-        .json({ error: "Only technicians can self-assign tickets" });
+      return res.status(403).json({ error: "Only technicians can self-assign tickets" });
 
-    const ticket = await getVisibleTicket(req.user, req.params.id, {
-      techFilter: "all",
-    });
+    const ticket = await getVisibleTicket(req.user, req.params.id, { techFilter: "all" });
     if (!ticket)
-      return res
-        .status(404)
-        .json({ error: "Ticket not found or outside your allowed scope" });
+      return res.status(404).json({ error: "Ticket not found or outside your allowed scope" });
+    if (ticket.department !== deptForRole(req.user.role))
+      return res.status(403).json({ error: "You can only take tickets in your own department" });
+    if (TERMINAL_STATUSES.includes(ticket.status))
+      return res.status(400).json({ error: "This ticket is already closed or cancelled" });
 
-    const techDept = deptForRole(req.user.role);
-    if (ticket.department !== techDept)
-      return res
-        .status(403)
-        .json({ error: "You can only take tickets in your own department" });
+    const existing = await teamRoleOf(ticket, req.user.id);
+    if (existing)
+      return res.status(400).json({ error: `You are already assigned as ${existing} to this ticket.` });
 
-    if (["Closed", "Cancelled"].includes(ticket.status))
-      return res
-        .status(400)
-        .json({ error: "This ticket is already closed or cancelled" });
-
-    const selfAssignment = await db.pGet(
-      "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND technician_id = ? AND active = 1",
-      [ticket.id, req.user.id]
+    // Become Primary only if nobody holds it — decided inside the INSERT so two
+    // technicians tapping at the same moment cannot both become Primary.
+    const me = { id: req.user.id, username: req.user.username };
+    const asPrimary = await db.pRun(
+      `INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active)
+       SELECT ?, ?, ?, 'self-assignment', 'primary', 1, 1
+        WHERE NOT EXISTS (
+          SELECT 1 FROM ticket_assignments
+           WHERE ticket_id = ? AND (active = 1 OR is_active = 1)
+             AND (role_type = 'primary' OR role_type IS NULL OR technician_id = ?))
+          AND (SELECT assigned_technician_id FROM tickets WHERE id = ?) IS NULL`,
+      [ticket.id, me.id, me.id, ticket.id, me.id, ticket.id],
     );
-    if (selfAssignment) {
-      return res.status(400).json({
-        error: `You are already assigned as ${selfAssignment.role_type || 'primary'} to this ticket.`
-      });
-    }
-
-    const currentPrimary = await db.pGet(
-      "SELECT * FROM ticket_assignments WHERE ticket_id = ? AND role_type = 'primary' AND active = 1",
-      [ticket.id]
-    );
-
-    const roleType = !currentPrimary ? "primary" : "collaborator";
-
-    await db.pRun(
-      "INSERT INTO ticket_assignments (ticket_id, technician_id, assigned_by, reason, role_type, active, is_active) VALUES (?, ?, ?, ?, ?, 1, 1)",
-      [ticket.id, req.user.id, req.user.id, "self-assignment", roleType]
-    );
-
-    if (roleType === "primary") {
-      // Self-assignment records the technician but leaves the status untouched.
+    let roleType;
+    if (asPrimary.changes) {
+      roleType = "primary";
       await db.pRun(
         `UPDATE tickets SET assigned_technician_id = ?, assignee_name = ?,
            assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
            first_response_at = COALESCE(first_response_at, CURRENT_TIMESTAMP),
            updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [req.user.id, req.user.username, ticket.id]
+        [me.id, me.username, ticket.id],
       );
+      await logActivity(ticket.id, req.user, "ticket.assigned", `${me.username} took this ticket as Primary Technician / PIC.`);
     } else {
-      await db.pRun(
-        "UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        [ticket.id]
-      );
+      const added = await addCollaborator(ticket, me, req.user, "self-assignment", "self");
+      if (!added.added)
+        return res.status(400).json({ error: "You are already assigned to this ticket." });
+      roleType = "collaborator";
     }
 
-    await logActivity(
-      ticket.id,
-      req.user,
-      "ticket.assigned",
-      `Self-assigned as ${roleType} technician (${req.user.username})`
-    );
-
-    res.json(await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]));
+    const updated = await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticket.id]);
+    res.json({ ...toClientTicket(updated), self_role: roleType });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to self-assign ticket" });
+    sendError(res, e, "Failed to self-assign ticket");
   }
 });
 
 // --- Create ticket ---------------------------------------------------------
-// double-submit guard (very short window)
+// Double-submit guard (very short window), pruned so it never grows unbounded.
 const recentCreates = new Map();
+const DUP_WINDOW_MS = 8000;
+const pruneCreates = setInterval(() => {
+  const cutoff = Date.now() - DUP_WINDOW_MS;
+  for (const [k, t] of recentCreates) if (t < cutoff) recentCreates.delete(k);
+}, 60 * 1000);
+pruneCreates.unref();
 
 router.post("/api/tickets", requireAuth, async (req, res) => {
   try {
+    if (req.user.role === "Leader")
+      return res.status(403).json({ error: "View-only role cannot create tickets" });
     const b = req.body || {};
     const department = String(b.department || "").toUpperCase();
     if (!DEPARTMENTS.includes(department))
       return res.status(400).json({ error: "Department must be IT or ME" });
-    if (!b.outlet_code)
-      return res.status(400).json({ error: "Outlet is required" });
-    if (!b.category)
-      return res.status(400).json({ error: "Category is required" });
-    if (!b.description && !b.title)
-      return res
-        .status(400)
-        .json({ error: "A short issue description is required" });
+    if (!b.outlet_code) return res.status(400).json({ error: "Outlet is required" });
+    if (!b.category) return res.status(400).json({ error: "Category is required" });
 
-    // Validate category belongs to department.
+    const description = optStr(b.description, LIMITS.description, "Description");
+    const titleIn = optStr(b.title, LIMITS.title, "Subject");
+    if (!description && !titleIn)
+      return res.status(400).json({ error: "A short issue description is required" });
+
     const cat = await db.pGet(
-      "SELECT 1 FROM categories WHERE department_code = ? AND name = ?",
-      [department, b.category],
+      "SELECT 1 FROM categories WHERE department_code = ? AND name = ? AND active = 1",
+      [department, String(b.category)],
     );
     if (!cat)
-      return res
-        .status(400)
-        .json({
-          error: `Category "${b.category}" does not belong to ${department}`,
-        });
+      return res.status(400).json({ error: `Category "${String(b.category).slice(0, 60)}" is not available for ${department}` });
 
-    // Derive brand + region from outlet.
     const outlet = await db.pGet(
-      "SELECT code, brand_code, region FROM outlets WHERE code = ?",
-      [b.outlet_code],
+      "SELECT code, brand_code, region FROM outlets WHERE code = ? AND active = 1",
+      [String(b.outlet_code)],
     );
-    if (!outlet) return res.status(400).json({ error: "Unknown outlet" });
-    const brand_code = outlet.brand_code || null;
-    const region = outlet.region || "Jakarta";
+    if (!outlet) return res.status(400).json({ error: "Unknown or inactive outlet" });
 
     const urgency = URGENCIES.includes(b.urgency) ? b.urgency : "Medium";
     const reportMode = b.report_mode === "detailed" ? "detailed" : "quick";
-
-    // Requestor identity: explicit requestor name from form if provided, defaulting to logged in user.
     const requestorName =
-      b.requestor_name || b.customer_name || req.user.username;
-    const requestorEmail =
-      b.customer_email || req.user.email;
+      optStr(b.requestor_name || b.customer_name, LIMITS.name, "Requestor name") || req.user.username;
+    // Only admins may file on behalf of another email; everyone else files as themselves.
+    let requestorEmail = req.user.email;
+    if (isAdmin(req.user) && b.customer_email) {
+      const ce = optStr(b.customer_email, 254, "Requestor email");
+      if (ce && !EMAIL_RE.test(ce)) return res.status(400).json({ error: "Requestor email is not valid" });
+      if (ce) requestorEmail = ce.toLowerCase();
+    }
+    const contactNumber = optPhone(b.contact_number, "Contact number");
+    const fields = {
+      contact_person: optStr(b.contact_person, LIMITS.name, "Contact person") || requestorName,
+      location_detail: optStr(b.location_detail, LIMITS.short, "Location"),
+      device_equipment: optStr(b.device_equipment, LIMITS.short, "Device"),
+      business_impact: optStr(b.business_impact, LIMITS.short, "Business impact"),
+      preferred_visit_time: optStr(b.preferred_visit_time, LIMITS.short, "Preferred visit time"),
+      occurrence_at: optDateTime(b.occurrence_at, "When it happened"),
+      scheduled_at: optDateTime(b.scheduled_at, "Scheduled start"),
+      scheduled_end: optDateTime(b.scheduled_end, "Scheduled end"),
+    };
+    if (fields.scheduled_at && fields.scheduled_end &&
+        Date.parse(fields.scheduled_end) < Date.parse(fields.scheduled_at))
+      return res.status(400).json({ error: "Scheduled end must be after the scheduled start." });
 
-    // Double-click guard: same user + outlet + category + text within 8s → reject softly.
     const fp = crypto
       .createHash("sha1")
-      .update(
-        `${req.user.id}|${b.outlet_code}|${b.category}|${b.description || b.title || ""}`,
-      )
+      .update(`${req.user.id}|${outlet.code}|${b.category}|${description || titleIn || ""}`)
       .digest("hex");
     const last = recentCreates.get(fp);
-    if (last && Date.now() - last < 8000) {
-      return res
-        .status(409)
-        .json({
-          error: "Looks like a duplicate submission — please wait a moment.",
-        });
-    }
+    if (last && Date.now() - last < DUP_WINDOW_MS)
+      return res.status(409).json({ error: "Looks like a duplicate submission. Please wait a moment." });
     recentCreates.set(fp, Date.now());
 
-    const title =
-      b.title ||
-      (b.description
-        ? String(b.description).slice(0, 80)
-        : `${b.category} issue`);
-    const ticketNumber = await nextTicketNumber(department);
-
-    const r = await db.pRun(
-      `INSERT INTO tickets
-        (ticket_number, title, description, department, category, outlet_code, brand_code, region,
-         status, urgency, report_mode, requestor_user_id, customer_name, customer_email,
-         contact_person, contact_number, location_detail, device_equipment, business_impact,
-         preferred_visit_time, occurrence_at, scheduled_at, scheduled_end, assignee_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unassigned')`,
-      [
-        ticketNumber,
-        title,
-        b.description || title,
-        department,
-        b.category,
-        outlet.code,
-        brand_code,
-        region,
-        urgency,
-        reportMode,
-        req.user.id,
-        requestorName,
-        requestorEmail,
-        b.contact_person || requestorName,
-        b.contact_number || null,
-        b.location_detail || null,
-        b.device_equipment || null,
-        b.business_impact || null,
-        b.preferred_visit_time || null,
-        b.occurrence_at || null,
-        b.scheduled_at || null,
-        b.scheduled_end || null,
-      ],
+    const title = titleIn || (description ? description.slice(0, 80) : `${b.category} issue`);
+    const { number: ticketNumber, result: r } = await insertWithNumber(department, (number) =>
+      db.pRun(
+        `INSERT INTO tickets
+          (ticket_number, title, description, department, category, outlet_code, brand_code, region,
+           status, urgency, report_mode, requestor_user_id, customer_name, customer_email,
+           contact_person, contact_number, location_detail, device_equipment, business_impact,
+           preferred_visit_time, occurrence_at, scheduled_at, scheduled_end, assignee_name, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unassigned', 'authenticated')`,
+        [
+          number, title, description || title, department, String(b.category), outlet.code,
+          outlet.brand_code || null, outlet.region || "Jakarta", urgency, reportMode, req.user.id,
+          requestorName, requestorEmail, fields.contact_person, contactNumber,
+          fields.location_detail, fields.device_equipment, fields.business_impact,
+          fields.preferred_visit_time, fields.occurrence_at, fields.scheduled_at, fields.scheduled_end,
+        ],
+      ),
     );
     const ticketId = r.lastID;
 
-    // Link any pre-uploaded attachments.
-    if (Array.isArray(b.attachmentIds) && b.attachmentIds.length) {
-      const ph = b.attachmentIds.map(() => "?").join(",");
+    // Link the caller's own pre-uploaded attachments.
+    const ids = normalizeIds(b.attachmentIds);
+    if (ids.length) {
       await db.pRun(
-        `UPDATE attachments SET ticket_id = ? WHERE id IN (${ph}) AND ticket_id IS NULL`,
-        [ticketId, ...b.attachmentIds],
+        `UPDATE attachments SET ticket_id = ?
+          WHERE id IN (${ids.map(() => "?").join(",")}) AND ticket_id IS NULL AND uploaded_by = ?`,
+        [ticketId, ...ids, req.user.id],
       );
     }
 
@@ -1287,7 +1198,6 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
       `${ticketNumber} • ${department}/${b.category} • ${outlet.code}`,
     );
 
-    // Notify department admins (in-app).
     const admins = await db.pAll(
       `SELECT username, email, phone FROM users WHERE is_active = 1 AND role IN ('SuperAdmin', ?)`,
       [department === "IT" ? "AdminIT" : "AdminME"],
@@ -1299,59 +1209,33 @@ router.post("/api/tickets", requireAuth, async (req, res) => {
       channels: ["in_app"],
     });
 
-    const displayTicketNumber = outlet.code ? `${ticketNumber} - ${outlet.code}` : ticketNumber;
+    const displayTicketNumber = `${ticketNumber} - ${outlet.code}`;
     const ticketUrl = `${APP_URL}/tickets/${ticketId}`;
-
-    // Notify customer (WhatsApp) if a contact number was provided.
-    if (b.contact_number) {
+    if (contactNumber) {
       notify("ticket.created", {
         ticketId,
         ticketNumber: displayTicketNumber,
-        recipients: [
-          {
-            name: b.contact_person || requestorName,
-            phone: b.contact_number,
-          },
-        ],
+        recipients: [{ name: fields.contact_person, phone: contactNumber }],
         message: `Tiket pelaporan anda telah berhasil dibuat!\n\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}`,
         channels: ["whatsapp"],
       });
     }
-
-    // Notify Technicians / WhatsApp Group
-    const techGroupTarget = (department === 'ME' ? process.env.FONNTE_WA_GROUP_ME : process.env.FONNTE_WA_GROUP_IT) || process.env.FONNTE_WA_GROUP || '120363410098180945@g.us';
-    const techWaRecipients = [];
-    if (techGroupTarget) {
-      techWaRecipients.push({ name: `${department} Technician Group`, phone: techGroupTarget });
-    }
-    const techsWithPhone = await db.pAll(
-      `SELECT username, phone FROM users WHERE is_active = 1 AND phone IS NOT NULL AND phone != '' AND role IN ('SuperAdmin', ?, ?)`,
-      [department === "IT" ? "AdminIT" : "AdminME", department === "IT" ? "TechnicianIT" : "TechnicianME"]
-    );
-    for (const t of techsWithPhone) {
-      if (!techWaRecipients.some(r => r.phone === t.phone)) {
-        techWaRecipients.push({ name: t.username, phone: t.phone });
-      }
-    }
-
-    if (techWaRecipients.length > 0) {
-      const groupAlertMessage = `🚨 *TIKET BARU TERBUAT* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}\n• *Departemen*: ${department}\n• *Kategori*: ${b.category || '—'}\n• *Outlet*: ${outlet.code || '—'}\n• *Pelapor*: ${b.contact_person || requestorName}${b.contact_number ? ' (' + b.contact_number + ')' : ''}\n• *Deskripsi*: ${b.description || '—'}`;
-      notify("ticket.created", {
-        ticketId,
-        ticketNumber: displayTicketNumber,
-        recipients: techWaRecipients,
-        message: groupAlertMessage,
-        channels: ["whatsapp"],
-      });
-    }
-
-    const ticket = await db.pGet("SELECT * FROM tickets WHERE id = ?", [
+    alertNewTicket({
       ticketId,
-    ]);
-    res.status(201).json(ticket);
+      department,
+      displayNumber: displayTicketNumber,
+      message:
+        `🚨 *TIKET BARU TERBUAT* 🚨\n• *Nomor Tiket*: ${displayTicketNumber}\n👉 ${ticketUrl}` +
+        `\n• *Departemen*: ${department}\n• *Kategori*: ${b.category}\n• *Outlet*: ${outlet.code}` +
+        `\n• *Urgensi*: ${urgency}` +
+        `\n• *Pelapor*: ${fields.contact_person}${contactNumber ? " (" + contactNumber + ")" : ""}` +
+        `\n• *Deskripsi*: ${(description || title).slice(0, 500)}`,
+    }).catch((e) => console.error("[notify] alert failed:", e.message));
+
+    const ticket = await db.pGet("SELECT * FROM tickets WHERE id = ?", [ticketId]);
+    res.status(201).json(toClientTicket(ticket));
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to create ticket" });
+    sendError(res, e, "Failed to create ticket");
   }
 });
 

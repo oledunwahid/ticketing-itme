@@ -13,10 +13,18 @@
    heavy packages just for CSV).
    ========================================================================== */
 
+// Spreadsheet formula injection: a text cell starting with = @ (or + / -
+// followed by something that is not a plain number/phone) is prefixed with an
+// apostrophe so Excel shows it as text. parseCsv() strips that prefix again.
+const FORMULA_RE = /^(?:[=@\t\r]|[+-](?![\d\s().-]*$))/;
+function neutralizeFormula(s) {
+  return FORMULA_RE.test(s) ? "'" + s : s;
+}
+
 function toCsv(headers, records) {
   const esc = (v) => {
     if (v === null || v === undefined) return "";
-    const s = String(v);
+    const s = typeof v === "string" ? neutralizeFormula(v) : String(v);
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const lines = [headers.map(esc).join(",")];
@@ -25,7 +33,7 @@ function toCsv(headers, records) {
 }
 
 function parseCsv(text) {
-  const s = String(text == null ? "" : text).replace(/^﻿/, ""); // strip BOM
+  const s = String(text == null ? "" : text).replace(/^\uFEFF/, ""); // strip BOM
   const records = [];
   let field = "";
   let row = [];
@@ -55,10 +63,13 @@ function parseCsv(text) {
   const headers = nonEmpty[0].map((h) => h.trim());
   const rows = nonEmpty.slice(1).map((r) => {
     const obj = {};
-    headers.forEach((h, idx) => { obj[h] = (r[idx] !== undefined ? r[idx] : "").trim(); });
+    headers.forEach((h, idx) => {
+      const v = (r[idx] !== undefined ? r[idx] : "").trim();
+      obj[h] = /^'[=+\-@]/.test(v) ? v.slice(1) : v;
+    });
     return obj;
   });
   return { headers, rows };
 }
 
-module.exports = { toCsv, parseCsv };
+module.exports = { toCsv, parseCsv, neutralizeFormula };

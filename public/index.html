@@ -3,75 +3,92 @@
 <head>
   <meta charset="UTF-8">
   <base href="/">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#4f46e5">
-  <title>IT-ME Ticketing</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="IT Ticketing: report, assign and track IT issues across outlets.">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="color-scheme" content="dark light">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="IT Ticketing">
+  <meta name="referrer" content="same-origin">
+  <title>IT Ticketing</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M18.5 7H11a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V11.5z' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M13 17h6M13 21h6' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <noscript><p style="padding:24px;font-family:system-ui,sans-serif">IT Ticketing needs JavaScript. Please enable it in your browser.</p></noscript>
+
   <!-- Boot loader -->
-  <div id="app-loading" class="app-loading-screen">
+  <div id="app-loading" class="app-loading-screen" role="status" aria-live="polite">
     <div class="spinner"></div>
-    <p>Loading…</p>
+    <p>Loading IT Ticketing…</p>
   </div>
 
-  <!-- AUTH (login / register) -->
+  <!-- AUTH / public pages -->
   <div id="auth-root" class="auth-root" hidden></div>
 
   <!-- APP SHELL -->
   <div id="app-shell" class="app-shell" hidden>
-    <!-- Mobile drawer overlay -->
     <div id="drawer-overlay" class="drawer-overlay" hidden></div>
 
-    <aside id="sidebar" class="sidebar">
+    <aside id="sidebar" class="sidebar" aria-label="Main navigation">
       <div class="brand">
-        <div class="brand-mark">IM</div>
-        <span class="brand-text">IT-ME<span class="brand-sub">Ticketing</span></span>
-        <button id="drawer-close" class="drawer-close" aria-label="Close menu">&times;</button>
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
+        <span class="brand-text">IT<span class="brand-sub">Ticketing</span></span>
+        <button type="button" id="drawer-close" class="drawer-close" aria-label="Close menu"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <nav id="nav-menu" class="nav-menu"><!-- rendered by JS --></nav>
       <div class="sidebar-footer">
         <div class="user-chip">
-          <div class="avatar" id="user-avatar">?</div>
+          <div class="avatar" id="user-avatar" aria-hidden="true">?</div>
           <div class="user-meta">
             <span class="user-name" id="user-name">…</span>
             <span class="user-role" id="user-role">…</span>
           </div>
         </div>
-        <button id="btn-change-password" class="btn-outline btn-change-pw" style="width:100%;margin-top:6px;justify-content:center;font-size:12px">🔑 Change Password</button>
-        <button id="btn-logout" class="btn-primary btn-logout">Sign out</button>
+        <button type="button" id="btn-change-password" class="btn-ghost side-btn">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8"/><path d="m16 7 3 3"/><path d="m19 4 2 2"/></svg>
+          Change password
+        </button>
+        <button type="button" id="btn-logout" class="btn-ghost side-btn">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Sign out
+        </button>
       </div>
     </aside>
 
     <div class="main-wrap">
       <header class="topbar">
-        <button id="btn-hamburger" class="icon-btn hamburger" aria-label="Menu">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        <button type="button" id="btn-hamburger" class="icon-btn hamburger" aria-label="Open menu" aria-controls="sidebar">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         </button>
         <h1 id="page-title" class="page-title">Dashboard</h1>
         <div class="topbar-actions">
-          <button id="btn-theme" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
-            <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-            <svg class="ico-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg>
+          <span class="offline-pill" role="status">Offline</span>
+          <button type="button" id="btn-theme" class="icon-btn" aria-label="Toggle light / dark theme" title="Toggle theme">
+            <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <svg class="ico-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg>
           </button>
-          <button id="btn-report-quick" class="btn-primary btn-report">＋ Report Issue</button>
+          <button type="button" id="btn-report-quick" class="btn-primary btn-report" title="Report an issue (N)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>Report<span class="lbl-long"> issue</span></span>
+          </button>
         </div>
       </header>
 
-      <main id="app-view" class="app-view"><!-- views rendered by JS --></main>
-
-      <!-- Mobile bottom nav -->
-      <nav id="bottom-nav" class="bottom-nav"><!-- rendered by JS --></nav>
+      <main id="app-view" class="app-view" tabindex="-1"><!-- views rendered by JS --></main>
     </div>
+
+    <nav id="bottom-nav" class="bottom-nav" aria-label="Quick navigation"><!-- rendered by JS --></nav>
   </div>
 
   <!-- Modal + toast roots -->
   <div id="modal-root"></div>
-  <div id="toast-container" class="toast-container"></div>
+  <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
 
-  <script src="/app.js"></script>
+  <script src="/charts.js" defer></script>
+  <script src="/app.js" defer></script>
 </body>
 </html>

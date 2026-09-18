@@ -1,5 +1,6 @@
 const CONFIG = {
-  get fonnteToken() { return process.env.FONNTE_TOKEN || 'Wu2xW5TcrCS8xQg8j6Xu'; },
+  // Never hard-code the token: it lives in .env (FONNTE_TOKEN).
+  get fonnteToken() { return process.env.FONNTE_TOKEN || ''; },
   get fonnteEndpoint() { return process.env.FONNTE_ENDPOINT || 'https://api.fonnte.com/send'; },
 };
 
@@ -66,6 +67,7 @@ async function sendWhatsApp(phone, ticketNumber, customMessage) {
 
     const response = await fetch(CONFIG.fonnteEndpoint, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers: {
         'Authorization': CONFIG.fonnteToken,
         'Content-Type': 'application/json'
@@ -73,7 +75,8 @@ async function sendWhatsApp(phone, ticketNumber, customMessage) {
       body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
+    let data = {};
+    try { data = await response.json(); } catch (_) { /* non-JSON error page */ }
 
     if (!response.ok || data.status === false) {
       const errorMsg = data.reason || data.detail || `Fonnte API responded with status ${response.status}`;

@@ -3,12 +3,10 @@
    Node.js + SQLite (sqlite3). Additive, data-preserving migrations.
    ========================================================================== */
 const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
 const bcrypt = require('bcryptjs');
 
-const dbPath = process.env.DB_PATH
-  ? path.resolve(process.env.DB_PATH)
-  : path.resolve(__dirname, 'tickets.db');
+// Resolved by the env module so a DB_PATH set in .env is honoured too.
+const { DB_PATH: dbPath, IS_PROD } = require('./src/config/env');
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
@@ -42,6 +40,26 @@ db.pAll = all;
 db.pGet = get;
 db.pRun = run;
 db.pExec = exec;
+
+/* Serialized transaction helper. All requests share this one connection, so
+   two overlapping BEGINs would fail — callers queue here instead. */
+let txQueue = Promise.resolve();
+db.transaction = (fn) => {
+  const runTx = async () => {
+    await exec('BEGIN IMMEDIATE');
+    try {
+      const out = await fn();
+      await exec('COMMIT');
+      return out;
+    } catch (e) {
+      await exec('ROLLBACK').catch(() => {});
+      throw e;
+    }
+  };
+  const p = txQueue.then(runTx, runTx);
+  txQueue = p.catch(() => {});
+  return p;
+};
 
 // --- Reference data --------------------------------------------------------
 const BRANDS = [
@@ -685,6 +703,26 @@ async function runMigrations() {
     await run('CREATE INDEX IF NOT EXISTS idx_assignments_role_type ON ticket_assignments(role_type)');
   });
 
+  // m017 — session revocation, last login, and the indexes the hot paths need
+  // (ticket scoping by technician/outlet, detail-page child lookups, sorting).
+  await migrate('m017_security_and_indexes', async () => {
+    await addColumn('users', 'token_version', 'INTEGER DEFAULT 0');
+    await addColumn('users', 'last_login_at', 'DATETIME');
+    await exec(`
+      CREATE INDEX IF NOT EXISTS idx_tickets_assignee ON tickets(assigned_technician_id);
+      CREATE INDEX IF NOT EXISTS idx_tickets_outlet ON tickets(outlet_code);
+      CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at);
+      CREATE INDEX IF NOT EXISTS idx_tickets_requestor ON tickets(requestor_user_id);
+      CREATE INDEX IF NOT EXISTS idx_comments_ticket ON comments(ticket_id);
+      CREATE INDEX IF NOT EXISTS idx_activity_ticket ON ticket_activity_logs(ticket_id);
+      CREATE INDEX IF NOT EXISTS idx_attachments_ticket ON attachments(ticket_id);
+      CREATE INDEX IF NOT EXISTS idx_assignments_tech ON ticket_assignments(technician_id, active);
+      CREATE INDEX IF NOT EXISTS idx_outlet_access_user ON user_outlet_access(user_id);
+      CREATE INDEX IF NOT EXISTS idx_schedules_user ON technician_schedules(user_id, day_of_week);
+      CREATE INDEX IF NOT EXISTS idx_unavail_user ON technician_unavailability(user_id);
+    `);
+  });
+
   // m016 — Seed user Edi (TechnicianIT)
   await migrate('m016_seed_edi_user', async () => {
     const existing = await get("SELECT id FROM users WHERE LOWER(username) = 'edi' OR LOWER(email) = 'edi@union.com'");
@@ -701,9 +739,28 @@ async function runMigrations() {
 
 // --- Demo seed (fresh installs only) --------------------------------------
 async function seedIfEmpty() {
-  const row = await get('SELECT COUNT(*) AS count FROM users');
+  // m016 inserts one technician during migrations, so "empty" means: no
+  // account other than that one.
+  const row = await get("SELECT COUNT(*) AS count FROM users WHERE LOWER(email) != 'edi@union.com'");
   if (row.count > 0) return;
+
+  // Production-style bootstrap: create just the first SuperAdmin from env.
+  const adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const adminPassword = process.env.ADMIN_PASSWORD || '';
+  if (adminEmail && adminPassword) {
+    await run(
+      `INSERT INTO users (username, email, password_hash, role, all_brands, all_outlets, is_active)
+       VALUES (?, ?, ?, 'SuperAdmin', 1, 1, 1)`,
+      [process.env.ADMIN_NAME || 'Administrator', adminEmail, bcrypt.hashSync(adminPassword, 10)]
+    );
+    console.log(`Created initial SuperAdmin ${adminEmail}. Remove ADMIN_PASSWORD from .env now.`);
+    return;
+  }
+
   console.log('Seeding IT-ME demo data (fresh install)...');
+  if (IS_PROD) {
+    console.warn('[security] Demo accounts use the password "Password123!". Set ADMIN_EMAIL/ADMIN_PASSWORD for a clean install.');
+  }
 
   const pw = bcrypt.hashSync('Password123!', 10);
   const users = [
@@ -744,14 +801,49 @@ async function seedIfEmpty() {
   // A couple of skills
   await run('INSERT INTO technician_skills (user_id, department_code, category_name) VALUES (?, ?, ?)', [ids['techit1@union.com'], 'IT', 'POS System']);
   await run('INSERT INTO technician_skills (user_id, department_code, category_name) VALUES (?, ?, ?)', [ids['techme1@union.com'], 'ME', 'AC']);
+  // Demo PIC coverage (the m011 migration ran before these users existed).
+  const picMap = {
+    'techit1@union.com': ['UPS', 'USC', 'UCP'],
+    'techit2@union.com': ['UGI', 'UPIM', 'UPIK'],
+    'techme1@union.com': ['UMKG', 'USMS', 'UMPI'],
+    'techme2@union.com': ['UTP', 'UPKW'],
+  };
+  for (const [email, outlets] of Object.entries(picMap)) {
+    for (const oc of outlets) {
+      await run('INSERT OR IGNORE INTO user_outlet_access (user_id, outlet_code) VALUES (?, ?)', [ids[email], oc]);
+    }
+  }
 }
 
 // --- Init orchestration ----------------------------------------------------
+// Warn (never block) when well-known demo accounts still use the demo password.
+async function warnDefaultPasswords() {
+  const rows = await all(
+    "SELECT email, password_hash FROM users WHERE is_active = 1 AND email LIKE '%@union.com'"
+  );
+  const weak = [];
+  for (const r of rows) {
+    if (await bcrypt.compare('Password123!', r.password_hash)) weak.push(r.email);
+  }
+  if (weak.length) {
+    console.warn(
+      `[security] ${weak.length} active account(s) still use the demo password "Password123!": ` +
+      `${weak.join(', ')}. Change them or deactivate them.`
+    );
+  }
+}
+
 async function initDatabase() {
+  // WAL lets readers keep working while a write is in progress; busy_timeout
+  // rides out short lock contention instead of failing the request.
+  await run('PRAGMA journal_mode = WAL');
+  await run('PRAGMA busy_timeout = 5000');
+  await run('PRAGMA synchronous = NORMAL');
   await run('PRAGMA foreign_keys = ON');
   await createBaseTables();
   await runMigrations();
   await seedIfEmpty();
+  if (IS_PROD) warnDefaultPasswords().catch(() => {});
   console.log('Database ready:', dbPath);
 }
 

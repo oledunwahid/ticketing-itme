@@ -464,3 +464,84 @@ test("public quick report is disabled; everything requires login", async () => {
   assert.equal((await c.post("/api/public/quick-report", {})).status, 404);
   assert.equal((await c.get("/api/tickets")).status, 401);
 });
+
+test("master data workbook: template, preview, all-or-nothing import, export", async () => {
+  const { buildXlsx } = require("../src/utils/xlsx");
+  const { readXlsx } = require("../src/utils/xlsxRead");
+  const sa = await login("superadmin@union.com");
+
+  // Template: README + one empty sheet per module, headers in row 1.
+  const tpl = await fetch(base + "/api/export/template", { headers: { cookie: sa.cookie } });
+  assert.equal(tpl.status, 200);
+  const sheets = readXlsx(Buffer.from(await tpl.arrayBuffer()));
+  assert.deepEqual(sheets.map((s) => s.name), ["README", "Brands", "Locations", "Categories", "Users", "Schedules", "User outlets"]);
+  const usersSheet = sheets.find((s) => s.name === "Users");
+  assert.deepEqual(usersSheet.rows.length, 1);
+  assert.ok(usersSheet.rows[0].cells.includes("initial_password"));
+
+  const sheet = (name, headers, rows) => ({ name, columns: headers.map((h) => ({ header: h, key: h })), rows });
+  const book = (extraUserRows = []) => buildXlsx([
+    sheet("Brands", ["code", "name"], [{ code: "ACME", name: "Acme Corp" }]),
+    sheet("Locations", ["code", "name", "brand_code", "region"], [{ code: "AC1", name: "Acme One", brand_code: "acme", region: "surabaya" }]),
+    sheet("Categories", ["department", "name", "sort_order"], [{ department: "IT", name: "Kiosk", sort_order: 5 }]),
+    sheet("Users", ["email", "username", "role", "phone", "all_outlets", "initial_password"], [
+      { email: "new.tech@acme.test", username: "New Tech", role: "TechnicianIT", phone: "081234567890", all_outlets: 0, initial_password: "Welcome#2026x" },
+      { email: "store@acme.test", username: "Acme Store", role: "Requestor", initial_password: "Welcome#2026x" },
+      ...extraUserRows,
+    ]),
+    sheet("Schedules", ["technician_email", "day", "start_time", "end_time"], [
+      { technician_email: "new.tech@acme.test", day: "Mon", start_time: "09:00", end_time: "18:00" },
+      { technician_email: "new.tech@acme.test", day: "Tue", start_time: "0.375", end_time: "0.75" }, // Excel time fractions
+    ]),
+    sheet("User outlets", ["user_email", "outlet_code"], [
+      { user_email: "new.tech@acme.test", outlet_code: "AC1" },
+      { user_email: "store@acme.test", outlet_code: "AC1" },
+    ]),
+  ]);
+  const send = (buf, dryRun) => sa.post("/api/import/workbook", { file: buf.toString("base64"), dryRun });
+
+  // One bad row anywhere rejects the whole workbook, with the Excel row number.
+  const bad = book([{ email: "weak@acme.test", username: "Weak", role: "Requestor", initial_password: "short" }]);
+  const pre = await send(bad, true);
+  assert.equal(pre.status, 200, pre.text);
+  const users = pre.body.modules.find((m) => m.key === "users");
+  assert.equal(users.errors.length, 1);
+  assert.equal(users.errors[0].row, 4);
+  assert.equal((await send(bad, false)).status, 400);
+  assert.equal((await sa.get("/api/outlets")).body.some((o) => o.code === "AC1"), false);
+
+  // Valid workbook: preview, then apply. Later sheets can use rows from earlier ones.
+  const good = book();
+  const dry = await send(good, true);
+  assert.equal(dry.body.summary.invalid, 0, JSON.stringify(dry.body.modules.map((m) => m.errors)));
+  assert.equal(dry.body.summary.toInsert, 9);
+  const applied = await send(good, false);
+  assert.equal(applied.status, 200, applied.text);
+  assert.equal(applied.body.summary.applied, 9);
+
+  const tech = await login("new.tech@acme.test", "Welcome#2026x");
+  assert.equal((await tech.get("/api/auth/me")).body.role, "TechnicianIT");
+  const sched = await db.pAll(
+    "SELECT day_of_week, start_time, end_time FROM technician_schedules s JOIN users u ON u.id = s.user_id WHERE u.email = ? ORDER BY day_of_week",
+    ["new.tech@acme.test"],
+  );
+  assert.deepEqual(sched.map((s) => `${s.day_of_week} ${s.start_time}-${s.end_time}`), ["1 09:00-18:00", "2 09:00-18:00"]);
+  const outlet = await db.pGet("SELECT brand_code, region FROM outlets WHERE code = 'AC1'");
+  assert.deepEqual({ ...outlet }, { brand_code: "ACME", region: "Surabaya" });
+
+  // Re-importing the same file only updates (nothing duplicated).
+  const again = await send(good, true);
+  assert.equal(again.body.summary.toInsert, 0);
+
+  // Full export round-trips through the reader; passwords are never exported.
+  const exp = await fetch(base + "/api/export/workbook", { headers: { cookie: sa.cookie } });
+  const out = readXlsx(Buffer.from(await exp.arrayBuffer()));
+  const outUsers = out.find((s) => s.name === "Users").rows;
+  const pwCol = outUsers[0].cells.indexOf("initial_password");
+  assert.ok(outUsers.some((r) => r.cells.includes("new.tech@acme.test")));
+  assert.ok(outUsers.slice(1).every((r) => !r.cells[pwCol]));
+
+  // Imports stay SuperAdmin-only.
+  const admin = await login("adminit@union.com");
+  assert.equal((await admin.post("/api/import/workbook", { file: good.toString("base64"), dryRun: true })).status, 403);
+});

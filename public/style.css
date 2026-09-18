@@ -895,6 +895,20 @@ details[open] > summary::before { transform: rotate(90deg); }
 .ie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
 .ie-grid .panel + .panel { margin-top: 0; }
 .ie-grid code { font-size: 0.76rem; word-break: break-word; }
+.ie-book { margin-bottom: 20px; }
+.ie-steps { margin: 0 0 14px; padding-left: 20px; display: grid; gap: 6px; font-size: 0.86rem; color: var(--text-muted); }
+.ie-steps b { color: var(--text); font-weight: 600; }
+.ie-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ie-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.ie-sec { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
+.ie-sec + .ie-sec { margin-top: 10px; }
+.ie-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ie-sec-head h4 { font-size: 0.9rem; font-weight: 700; margin: 0; }
+.ie-errs { margin-top: 8px; max-height: 180px; overflow: auto; }
+.ie-errs td:first-child { width: 56px; color: var(--text-muted); }
+.ie-prev { margin-top: 8px; font-size: 0.82rem; }
+.ie-prev summary { cursor: pointer; color: var(--text-muted); padding: 2px 0; }
+.ie-prev .table-wrap { margin-top: 6px; max-height: 220px; overflow: auto; }
 
 /* ---------- Schedules --------------------------------------------------- */
 .sched-toolbar2 { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }

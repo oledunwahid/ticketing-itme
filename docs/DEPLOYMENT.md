@@ -196,12 +196,22 @@ To run the application reliably on a Synology NAS using Container Manager:
 6. **Users are signed out after a password reset / role change**:
    - Expected: changing a password, role or deactivating an account revokes that user's sessions immediately.
 
-## 5. Health check & verification
+## 5. Loading real master data
+
+1. Start on an empty database with `ADMIN_EMAIL` / `ADMIN_PASSWORD` set, so no demo accounts are created. Remove `ADMIN_PASSWORD` from `.env` after the first start.
+2. Sign in as that SuperAdmin and open **Import / Export**.
+3. **Download template**. It has a README sheet explaining every column, plus one sheet each for Brands, Locations, Categories, Users, Schedules and User outlets.
+4. Fill in the sheets in Excel and upload them with **Import workbook**. The app checks every row first and saves nothing until all rows are valid. Row numbers in the check match Excel.
+5. New users need an `initial_password`. Delete those passwords from your copy of the file once the import is done.
+
+Re-importing the same workbook updates existing rows; imports never delete anything. **Export current data** gives you the same workbook filled in, ready to edit and import again.
+
+## 6. Health check & verification
 
 - `GET /api/health` → `{"ok":true}` (no auth, no data) — use it for uptime monitoring.
 - Before deploying a new version: `npm ci && npm run check` (ESLint + API test suite on a throw-away database).
 
-## 6. Backups
+## 7. Backups
 
 SQLite runs in WAL mode. Back up with a consistent snapshot instead of copying the file while the app writes:
 

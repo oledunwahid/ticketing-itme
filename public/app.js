@@ -4012,17 +4012,40 @@ const confirmDeleteOutlet = (o, after) => confirmDeleteRow({
 });
 
 // ==========================================================================
-// View: Import / Export (CSV) — SuperAdmin (import) + admins (export)
+// View: Import / Export: master data workbook (Excel) + per-sheet CSV
+// SuperAdmin imports; admins export.
 // ==========================================================================
 const IE_MODULES = [
-  { key: 'users', label: 'Users', file: 'users.csv', cols: 'username, email, role, department, phone, is_active', upsert: 'Updates existing users matched by email. New emails are reported as errors. Create new users on the Users page.' },
-  { key: 'locations', label: 'Locations', file: 'locations.csv', cols: 'code, name, brand_code, region, active', upsert: 'Adds new outlets and updates existing ones, matched by code.' },
-  { key: 'schedules', label: 'Schedules', file: 'schedules.csv', cols: 'technician_email, day_of_week, start_time, end_time, active', upsert: 'Matched by technician + day_of_week + start/end time. day_of_week is 0 (Sun) – 6 (Sat).' },
+  { key: 'brands', label: 'Brands', cols: 'code, name, active', upsert: 'Adds new brands and updates existing ones, matched by code.' },
+  { key: 'locations', label: 'Locations', cols: 'code, name, brand_code, region, active', upsert: 'Adds new outlets and updates existing ones, matched by code.' },
+  { key: 'categories', label: 'Categories', cols: 'department, name, sort_order, active', upsert: 'Matched by department + name.' },
+  { key: 'users', label: 'Users', cols: 'email, username, role, phone, region, all_outlets, is_active, initial_password', upsert: 'New emails are created (initial_password required). Existing emails are updated; their passwords never change.' },
+  { key: 'schedules', label: 'Schedules', cols: 'technician_email, day, start_time, end_time, active', upsert: 'Matched by technician + day + start/end time. day is Mon to Sun.' },
+  { key: 'coverage', label: 'User outlets', cols: 'user_email, outlet_code', upsert: 'Technician PIC outlets, and the outlets a requestor may report for.' },
 ];
+const IE_LABEL = Object.fromEntries(IE_MODULES.map((m) => [m.key, m.label]));
+const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
+
 async function renderImportExport() {
   const isSuper = state.user.role === 'SuperAdmin';
   view().innerHTML = `
-    <div class="page-head"><h2>Import / Export</h2><p>${isSuper ? 'Export or bulk-import Users, Locations and Schedules as CSV.' : 'Export data as CSV. Importing is restricted to SuperAdmin.'}</p></div>
+    <div class="page-head"><h2>Import / Export</h2><p>${isSuper ? 'Load your master data from one Excel workbook, or work sheet by sheet with CSV.' : 'Export data. Importing is restricted to SuperAdmin.'}</p></div>
+    <div class="panel ie-book">
+      <div class="panel-head"><h3>${svg(ICONS.grid, 16)} Master data workbook</h3></div>
+      <div class="card" style="border:none">
+        <ol class="ie-steps">
+          <li><b>Download the template</b> (or export current data to edit it). The README sheet explains every column.</li>
+          <li><b>Fill the sheets</b> you need: Brands, Locations, Categories, Users, Schedules, User outlets. Leave the rest empty.</li>
+          <li><b>Import it.</b> You see a check of every row first; nothing is saved until all rows are valid.</li>
+        </ol>
+        <div class="ie-actions">
+          <button class="btn-outline" id="ie-template">${svg(ICONS.download, 15)} Download template</button>
+          <button class="btn-outline" id="ie-export-all">${svg(ICONS.download, 15)} Export current data</button>
+          ${isSuper ? `<button class="btn-primary" id="ie-import-book">${svg(ICONS.upload, 15)} Import workbook</button>` : ''}
+        </div>
+      </div>
+    </div>
+    <h3 class="sec-title mt">Single sheet (CSV)</h3>
     <div class="ie-grid">
       ${IE_MODULES.map((m) => `
         <div class="panel">
@@ -4032,24 +4055,25 @@ async function renderImportExport() {
             <p style="font-size:.8rem;margin-bottom:8px"><code>${esc(m.cols)}</code></p>
             <p class="hint" style="padding:0 0 12px">${esc(m.upsert)}</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn-outline" data-export="${m.key}" data-file="${m.file}">${svg(ICONS.download, 15)} Export</button>
+              <button class="btn-outline" data-export="${m.key}">${svg(ICONS.download, 15)} Export</button>
               ${isSuper ? `<button class="btn-primary" data-import="${m.key}">${svg(ICONS.upload, 15)} Import</button>` : ''}
             </div>
           </div>
         </div>`).join('')}
     </div>`;
-  $$('[data-export]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true;
-    try { await downloadExport(b.dataset.export, b.dataset.file); toast('Export downloaded', 'success'); }
+  const dl = async (btn, endpoint, filename, okMsg) => {
+    btn.disabled = true;
+    try { await downloadCsv(endpoint, filename); toast(okMsg, 'success'); }
     catch (e) { toast(e.message, 'error'); }
-    finally { b.disabled = false; }
-  }));
+    finally { btn.disabled = false; }
+  };
+  $('#ie-template').addEventListener('click', (e) => dl(e.currentTarget, '/api/export/template', 'master_data_template.xlsx', 'Template downloaded'));
+  $('#ie-export-all').addEventListener('click', (e) => dl(e.currentTarget, '/api/export/workbook', `master_data_${localISO(new Date())}.xlsx`, 'Export downloaded'));
+  const imp = $('#ie-import-book'); if (imp) imp.addEventListener('click', openWorkbookImport);
+  $$('[data-export]').forEach((b) => b.addEventListener('click', () => dl(b, '/api/export/' + b.dataset.export, b.dataset.export + '.csv', 'Export downloaded')));
   $$('[data-import]').forEach((b) => b.addEventListener('click', () => openImportModal(b.dataset.import)));
 }
-// Export downloads via rawFetch (keeps cookie auth + 401 re-auth), then saves the blob.
-async function downloadExport(module, filename) {
-  return downloadCsv('/api/export/' + module, filename);
-}
+// Downloads go through rawFetch (keeps cookie auth + 401 re-auth), then save the blob.
 async function downloadCsv(endpoint, filename) {
   const res = await rawFetch(endpoint, { method: 'GET' });
   if (!res.ok) { let m = 'Export failed'; try { m = (await res.json()).error || m; } catch (_) {} throw new Error(m); }
@@ -4060,55 +4084,80 @@ async function downloadCsv(endpoint, filename) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-// Import: pick a CSV → dry-run validate → preview → confirm → apply.
-function openImportModal(module) {
+function pickFile(accept, onFile) {
   const input = document.createElement('input');
-  input.type = 'file'; input.accept = '.csv,text/csv,text/plain';
-  input.addEventListener('change', async () => {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    let text;
-    try { text = await file.text(); } catch (_) { toast('Could not read file', 'error'); return; }
-    try {
-      const res = await api.importData(module, text, true); // dry run — no writes
-      showImportPreview(module, text, res);
-    } catch (e) { toast(e.message, 'error'); }
-  });
+  input.type = 'file'; input.accept = accept;
+  input.addEventListener('change', () => { const f = input.files && input.files[0]; if (f) onFile(f); });
   input.click();
 }
-function showImportPreview(module, csvText, res) {
+function toBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+// Workbook: pick .xlsx → dry run → preview per sheet → confirm → apply.
+function openWorkbookImport() {
+  pickFile('.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', async (file) => {
+    if (file.size > MAX_IMPORT_BYTES) return toast('That file is over 2 MB. Split it into smaller workbooks.', 'error');
+    let file64;
+    try { file64 = toBase64(await file.arrayBuffer()); } catch (_) { return toast('Could not read file', 'error'); }
+    const send = (dryRun) => apiJSON('/api/import/workbook', { method: 'POST', body: JSON.stringify({ file: file64, dryRun }) });
+    try { showImportPreview(file.name, await send(true), () => send(false)); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+}
+// CSV: one sheet at a time, same preview.
+function openImportModal(module) {
+  pickFile('.csv,text/csv,text/plain', async (file) => {
+    if (file.size > MAX_IMPORT_BYTES) return toast('That file is over 2 MB. Split it into smaller files.', 'error');
+    let text;
+    try { text = await file.text(); } catch (_) { return toast('Could not read file', 'error'); }
+    const send = async (dryRun) => {
+      const r = await api.importData(module, text, dryRun);
+      return { ...r, modules: [{ key: module, sheet: IE_LABEL[module] || module, summary: r.summary, errors: r.errors, preview: r.preview }] };
+    };
+    try { showImportPreview(IE_LABEL[module] || module, await send(true), () => send(false)); }
+    catch (e) { toast(e.message, 'error'); }
+  });
+}
+function showImportPreview(title, res, apply) {
   const s = res.summary || { total: 0, valid: 0, invalid: 0, toInsert: 0, toUpdate: 0 };
   const canApply = s.invalid === 0 && s.valid > 0;
-  const errRows = (res.errors || []).slice(0, 200).map((e) => `<tr><td>${esc(e.row)}</td><td class="muted">${esc(e.message)}</td></tr>`).join('');
-  const dataCols = (res.preview && res.preview[0]) ? Object.keys(res.preview[0]).filter((c) => c !== 'action') : [];
-  const prevRows = (res.preview || []).map((p) => `<tr><td><span class="badge ${p.action === 'insert' ? 'st-New' : 'st-Assigned'}">${esc(p.action)}</span></td>${dataCols.map((c) => `<td>${esc(p[c])}</td>`).join('')}</tr>`).join('');
+  const counts = (x) => `
+    <span class="badge st-New">${x.total} rows</span>
+    ${x.invalid ? `<span class="badge st-Cancelled">${x.invalid} invalid</span>` : `<span class="badge st-Resolved">all valid</span>`}
+    <span class="badge st-Assigned">${x.toInsert} new</span>
+    <span class="badge st-OnProgress">${x.toUpdate} update</span>`;
+  const section = (m) => {
+    const cols = m.preview && m.preview[0] ? Object.keys(m.preview[0]).filter((c) => c !== 'action') : [];
+    const errRows = (m.errors || []).slice(0, 200).map((e) => `<tr><td>${esc(e.row)}</td><td>${esc(e.message)}</td></tr>`).join('');
+    const prevRows = (m.preview || []).map((p) => `<tr><td><span class="badge ${p.action === 'insert' ? 'st-Assigned' : 'st-OnProgress'}">${p.action === 'insert' ? 'new' : 'update'}</span></td>${cols.map((c) => `<td>${esc(p[c] ?? '')}</td>`).join('')}</tr>`).join('');
+    return `<section class="ie-sec">
+      <div class="ie-sec-head"><h4>${esc(m.sheet)}</h4><div class="ie-badges">${counts(m.summary)}</div></div>
+      ${errRows ? `<div class="table-wrap ie-errs"><table class="data"><thead><tr><th>Row</th><th>Problem</th></tr></thead><tbody>${errRows}</tbody></table></div>` : ''}
+      ${cols.length ? `<details class="ie-prev"><summary>Preview (first ${(m.preview || []).length})</summary>
+        <div class="table-wrap"><table class="data"><thead><tr><th></th>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${prevRows}</tbody></table></div></details>` : ''}
+    </section>`;
+  };
   openModal({
-    title: `Import ${module}: preview`,
+    title: `Import ${title}: check`,
     size: 'lg',
     bodyHTML: `
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-        <span class="badge st-New">${s.total} rows</span>
-        <span class="badge st-Resolved">${s.valid} valid</span>
-        ${s.invalid ? `<span class="badge st-Cancelled">${s.invalid} invalid</span>` : ''}
-        <span class="badge st-Assigned">${s.toInsert} insert</span>
-        <span class="badge st-OnProgress">${s.toUpdate} update</span>
-      </div>
-      ${s.invalid ? `<div class="hint" style="color:var(--danger);padding:0 0 6px">Import is all-or-nothing. Fix the invalid row(s) below and re-upload; nothing is written until every row is valid.</div>
-        <div class="table-wrap" style="max-height:160px;overflow:auto"><table class="data"><thead><tr><th>Row</th><th>Error</th></tr></thead><tbody>${errRows}</tbody></table></div>` : ''}
-      ${dataCols.length ? `<div style="font-size:.82rem;font-weight:600;margin:12px 0 4px">Preview (first ${(res.preview || []).length})</div>
-        <div class="table-wrap" style="max-height:240px;overflow:auto"><table class="data"><thead><tr><th>Action</th>${dataCols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${prevRows}</tbody></table></div>` : '<p class="muted">No valid rows to preview.</p>'}`,
-    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-apply ${canApply ? '' : 'disabled'}>Apply import</button>`,
+      <div class="ie-badges" style="margin-bottom:10px">${counts(s)}</div>
+      ${s.invalid ? '<p class="form-alert" style="margin-bottom:12px">Nothing is saved until every row is valid. Fix the rows listed below in your file and upload it again. Row numbers match Excel.</p>' : '<p class="hint" style="margin-bottom:12px">Everything checks out. Nothing is saved until you press Import.</p>'}
+      ${(res.modules || []).map(section).join('')}`,
+    footHTML: `<button class="btn-ghost" data-cancel>Cancel</button><button class="btn-primary" data-apply ${canApply ? '' : 'disabled'}>Import ${s.valid} row${s.valid === 1 ? '' : 's'}</button>`,
     onMount(ov, close) {
       $('[data-cancel]', ov).addEventListener('click', close);
       const applyBtn = $('[data-apply]', ov);
       if (applyBtn && canApply) applyBtn.addEventListener('click', async () => {
-        applyBtn.disabled = true; applyBtn.textContent = 'Applying…';
+        applyBtn.disabled = true; applyBtn.textContent = 'Importing…';
         try {
-          const r = await api.importData(module, csvText, false);
-          toast(`Imported ${module}: ${r.summary.applied} applied (${r.summary.toInsert} new, ${r.summary.toUpdate} updated)`, 'success');
+          const r = await apply();
+          toast(`Imported ${r.summary.applied} rows (${r.summary.toInsert} new, ${r.summary.toUpdate} updated)`, 'success');
           close();
-          if (state.route && state.route.name === module) route();
-        } catch (e) { toast(e.message, 'error'); applyBtn.disabled = false; applyBtn.textContent = 'Apply import'; }
+        } catch (e) { toast(e.message, 'error'); applyBtn.disabled = false; applyBtn.textContent = 'Import'; }
       });
     },
   });

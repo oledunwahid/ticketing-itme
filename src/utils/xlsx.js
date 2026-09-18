@@ -4,8 +4,10 @@
    buildXlsx(sheets, { title, creator }) → Buffer
      sheets: [{ name, columns: [{ header, key, type, width }], rows: [obj],
                 title?: string, freeze?: true }]
-     column.type: 'string' | 'int' | 'number' | 'percent' | 'datetime' | 'date'
+     column.type: 'string' | 'text' | 'int' | 'number' | 'percent' | 'datetime' | 'date'
                   | 'typed' (use row.type, for mixed-format summary tables)
+       • text formats the whole column as Text (@), so values typed later in
+         Excel keep leading zeros (phones, codes) and are not turned into dates
        • percent values are fractions (0.873 → 87.3%)
        • datetime/date accept Date, epoch ms, or ISO/SQLite strings
 
@@ -107,7 +109,7 @@ function colName(i) {
 }
 
 // Style ids (see STYLES below)
-const S = { text: 0, header: 1, int: 2, number: 3, percent: 4, datetime: 5, title: 6, date: 7, subtle: 8 };
+const S = { text: 0, header: 1, int: 2, number: 3, percent: 4, datetime: 5, title: 6, date: 7, subtle: 8, textfmt: 9 };
 const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <numFmts count="3"><numFmt numFmtId="164" formatCode="yyyy-mm-dd hh:mm"/><numFmt numFmtId="165" formatCode="0.0"/><numFmt numFmtId="166" formatCode="yyyy-mm-dd"/></numFmts>
@@ -115,7 +117,7 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF4F46E5"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="9">
+<cellXfs count="10">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
 <xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
@@ -125,6 +127,7 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
 <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
@@ -164,7 +167,8 @@ function cell(ref, value, type) {
   }
   let s = String(value);
   if (s.length > 32000) s = s.slice(0, 32000);
-  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(s)}</t></is></c>`;
+  const style = type === "text" ? ` s="${S.textfmt}"` : "";
+  return `<c r="${ref}"${style} t="inlineStr"><is><t xml:space="preserve">${esc(s)}</t></is></c>`;
 }
 
 function sheetXml(sheet) {
@@ -201,7 +205,8 @@ function sheetXml(sheet) {
   const widths = cols
     .map((c, i) => {
       const w = c.width || Math.min(60, Math.max(10, String(c.header).length + 2));
-      return `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`;
+      const style = c.type === "text" ? ` style="${S.textfmt}"` : "";
+      return `<col min="${i + 1}" max="${i + 1}" width="${w}"${style} customWidth="1"/>`;
     })
     .join("");
   const freeze = sheet.freeze === false
@@ -227,7 +232,7 @@ function safeSheetName(name, used) {
   return n;
 }
 
-function buildXlsx(sheets, { title = "Export", creator = "IT-ME Ticketing" } = {}) {
+function buildXlsx(sheets, { title = "Export", creator = "IT Ticketing" } = {}) {
   const used = new Set();
   const named = sheets.map((s, index) => ({ ...s, index, safeName: safeSheetName(s.name, used) }));
   const files = [
